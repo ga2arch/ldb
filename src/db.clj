@@ -9,6 +9,7 @@
     (hashCode [this] ""))
 
 (defprotocol AConnection
+  (index [this name])
   (update-index [this name key datoms])
   (from-index [this name key])
   (append-log [this datoms]))
