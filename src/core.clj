@@ -9,19 +9,19 @@
   [index action [eid attr value tid]]
   (case action
     :db/add
-    (update-in index [eid] (fnil conj []) [attr value tid :assert])
+    (update-in index [eid] (fnil conj []) [eid attr value tid :assert])
 
     :db/retract
-    (update-in index [eid] (fnil conj []) [attr value tid :retract])))
+    (update-in index [eid] (fnil conj []) [eid attr value tid :retract])))
 
 (defn update-aevt
   [index action [attr eid value tid]]
   (case action
     :db/add
-    (update-in index [attr] (fnil conj []) [eid value tid :assert])
+    (update-in index [attr] (fnil conj []) [eid attr value tid :assert])
 
     :db/retract
-    (update-in index [attr] (fnil conj []) [eid value tid :retract])))
+    (update-in index [attr] (fnil conj []) [eid attr value tid :retract])))
 
 (defn update-index
   [type index action datom]
@@ -33,7 +33,7 @@
   [{eavt :eavt} eid]
   (when-let [datoms (get eavt eid)]
     (loop [entity {}
-           [[attr value _ op] & datoms] datoms]
+           [[_ attr value _ op] & datoms] datoms]
       (if-not attr
         entity
 
@@ -45,6 +45,19 @@
           :retract
           (recur (dissoc entity attr value)
                  datoms))))))
+
+(defn datoms-by-eid
+  [{eavt :eavt} eid]
+  (get eavt eid))
+
+(defn datoms-by-attr
+  [{aevt :aevt} attr]
+  (get aevt attr))
+
+(defn all-datoms
+  [db]
+  (->> (vals (:eavt db))
+       (apply concat)))
 
 (defn data->actions
   [db data]
@@ -61,7 +74,7 @@
             [all]))
         first)
 
-    (let [eid (or (:db/id data) (UUID/randomUUID))
+    (let [eid (or (:db/id data) (str (UUID/randomUUID)))
           entity (entity-by-id db eid)]
       (->>
         (for [[attr value] data
@@ -91,3 +104,63 @@
         (recur (update-index :eavt eavt action [eid attr value tid])
                (update-index :aevt aevt action [attr eid value tid])
                actions)))))
+
+
+;; query
+
+(defn is-var
+  [x]
+  (.startsWith (name x) "?"))
+
+(defn load-datoms
+  [db [eid attr _]]
+  (cond
+    (not (is-var eid))
+    (datoms-by-eid db eid)
+
+    (not (is-var attr))
+    (datoms-by-attr db attr)
+
+    :else
+    (all-datoms db)))
+
+(defn match-pattern
+  [frame pattern datoms]
+  (loop [[datom & datoms] datoms
+         frames []]
+    (if-not datom
+      frames
+
+      (if-let [frame (loop [i 0
+                            [v & pattern] pattern
+                            frame frame]
+
+                       (if (or (not v) (nil? frame))
+                         frame
+
+                         (let [v (get frame v v)
+                               dv (get datom i)]
+                           (if (is-var v)
+                             (recur (inc i) pattern (assoc frame v dv))
+
+                             (if (= dv v)
+                               (recur (inc i) pattern frame)
+                               (recur i pattern nil))))))]
+        (recur datoms (conj frames frame))
+        (recur datoms frames)))))
+
+(defn q
+  [db {:keys [find where]}]
+
+  (let [frames (loop [[pattern & where] where
+                      frames [{}]]
+
+                 (if-not pattern
+                   frames
+
+                   (let [nframes (mapcat #(match-pattern % pattern (load-datoms db pattern)) frames)]
+                     (recur where nframes))))]
+
+    (for [frame frames]
+      (for [f find]
+        (get frame f)))))
