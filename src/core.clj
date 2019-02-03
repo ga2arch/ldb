@@ -35,16 +35,14 @@
     (loop [entity {}
            [[_ attr value _ op] & datoms] datoms]
       (if-not attr
-        entity
+        (assoc entity :db/id eid)
 
         (case op
           :assert
-          (recur (assoc entity attr value)
-                 datoms)
+          (recur (assoc entity attr value) datoms)
 
           :retract
-          (recur (dissoc entity attr value)
-                 datoms))))))
+          (recur (dissoc entity attr value) datoms))))))
 
 (defn datoms-by-eid
   [{eavt :eavt} eid]
@@ -105,62 +103,77 @@
                (update-index :aevt aevt action [attr eid value tid])
                actions)))))
 
-
 ;; query
 
-(defn is-var
+(defn is-binding-var
   [x]
   (.startsWith (name x) "?"))
 
 (defn load-datoms
   [db [eid attr _]]
   (cond
-    (not (is-var eid))
+    (not (is-binding-var eid))
     (datoms-by-eid db eid)
 
-    (not (is-var attr))
+    (not (is-binding-var attr))
     (datoms-by-attr db attr)
 
     :else
     (all-datoms db)))
 
+(defn match-datom
+  [frame pattern datom]
+  (reduce (fn [frame [i binding-var]]
+            (let [binding-var (get frame binding-var binding-var)
+                  datom-var (get datom i)]
+              (if (is-binding-var binding-var)
+                (assoc frame binding-var datom-var)
+
+                (if (= datom-var binding-var)
+                  frame
+                  (reduced nil)))))
+          frame (map-indexed vector pattern)))
+
 (defn match-pattern
   [frame pattern datoms]
-  (loop [[datom & datoms] datoms
-         frames []]
-    (if-not datom
-      frames
-
-      (if-let [frame (loop [i 0
-                            [v & pattern] pattern
-                            frame frame]
-
-                       (if (or (not v) (nil? frame))
-                         frame
-
-                         (let [v (get frame v v)
-                               dv (get datom i)]
-                           (if (is-var v)
-                             (recur (inc i) pattern (assoc frame v dv))
-
-                             (if (= dv v)
-                               (recur (inc i) pattern frame)
-                               (recur i pattern nil))))))]
-        (recur datoms (conj frames frame))
-        (recur datoms frames)))))
+  (reduce (fn [frames datom]
+            (if-let [frame (match-datom frame pattern datom)]
+              (conj frames frame)
+              frames))
+          [] datoms))
 
 (defn q
   [db {:keys [find where]}]
-
-  (let [frames (loop [[pattern & where] where
-                      frames [{}]]
-
-                 (if-not pattern
-                   frames
-
-                   (let [nframes (mapcat #(match-pattern % pattern (load-datoms db pattern)) frames)]
-                     (recur where nframes))))]
+  (let [frames (reduce (fn [frames pattern]
+                         (mapcat #(match-pattern % pattern (load-datoms db pattern)) frames))
+                       [{}] where)]
 
     (for [frame frames]
       (for [f find]
         (get frame f)))))
+
+(comment
+  (def db-after (transaction db {:name    "Gabriele"
+                                 :surname "Carrettoni"}))
+  (def db-after (transaction db-after {:name    "Gabriele"
+                                       :surname "Cafarelli"}))
+  (def db-after (transaction db-after {:name    "Marco"
+                                       :surname "Carrettoni"}))
+
+  (def entities (q db-after {:find  '[?eid]
+                             :where '[[?eid ?name "Gabriele"]]}))
+
+  (map (fn [[eid]] (entity-by-id db-after eid)) entities)
+
+  ;; ({:name "Gabriele", :surname "Carrettoni", :db/id "9b057e2a-a75c-4cb8-beab-b99256c2dafd"}
+  ;;  {:name "Gabriele", :surname "Cafarelli", :db/id "9de83d97-f550-4b2c-86c4-f9da6f8ce779"})
+
+  (def entities (q db-after {:find  '[?eid]
+                             :where '[[?eid :name "Gabriele"]
+                                      [?eid :surname "Cafarelli"]]}))
+
+  (map (fn [[eid]] (entity-by-id db-after eid)) entities)
+
+  ;; ({:name "Gabriele", :surname "Cafarelli", :db/id "9de83d97-f550-4b2c-86c4-f9da6f8ce779"})
+
+  )
