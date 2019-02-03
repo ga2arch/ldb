@@ -5,23 +5,27 @@
          :aevt     {}
          :last-tid 0})
 
+(defn hash-datom
+  [[e a v]]
+  (str e a v))
+
 (defn update-eavt
   [index action [eid attr value tid]]
   (case action
     :db/add
-    (update-in index [eid] (fnil conj []) [eid attr value tid :assert])
+    (update-in index [eid] conj [eid attr value tid :assert])
 
     :db/retract
-    (update-in index [eid] (fnil conj []) [eid attr value tid :retract])))
+    (update-in index [eid] conj [eid attr value tid :retract])))
 
 (defn update-aevt
   [index action [attr eid value tid]]
   (case action
     :db/add
-    (update-in index [attr] (fnil conj []) [eid attr value tid :assert])
+    (update-in index [attr] conj [eid attr value tid :assert])
 
     :db/retract
-    (update-in index [attr] (fnil conj []) [eid attr value tid :retract])))
+    (update-in index [attr] conj [eid attr value tid :retract])))
 
 (defn update-index
   [type index action datom]
@@ -33,17 +37,21 @@
   [{eavt :eavt} eid]
   (when-let [datoms (get eavt eid)]
     (loop [entity {}
-           [[_ attr value _ op] & datoms] datoms]
+           seen #{}
+           [[_ attr value _ op :as datom] & datoms] datoms]
       (if-not attr
         (when-not (empty? entity)
           (assoc entity :db/id eid))
 
-        (case op
-          :assert
-          (recur (assoc entity attr value) datoms)
+        (let [hash (hash-datom datom)]
+          (if (seen hash)
+            (recur entity seen datoms)
+            (case op
+              :assert
+              (recur (assoc entity attr value) (conj seen hash) datoms)
 
-          :retract
-          (recur (dissoc entity attr value) datoms))))))
+              :retract
+              (recur entity (conj seen hash) datoms))))))))
 
 (defn datoms-by-eid
   [{eavt :eavt} eid]
@@ -65,7 +73,8 @@
           (case action
             :db.fn/retractEntity
             (if-let [entity (entity-by-id db eid)]
-              (for [[attr value] entity]
+              (for [[attr value] entity
+                    :when (not= attr :db/id)]
                 [:db/retract eid attr value])
               (throw (ex-info "entity not found" {:eid eid})))
 
@@ -122,48 +131,47 @@
     :else
     (all-datoms db)))
 
-(defn hash-datom
-  [[e a v]]
-  (str e a v))
-
 (defn match-datom
-  [frame pattern [_ _ _ _ op :as datom]]
-  (when-let [frame (reduce (fn [frame [i binding-var]]
-                             (if (= op :retract)
-                               (reduced {:op :retract})
+  [frame pattern datom]
+  (reduce (fn [frame [i binding-var]]
+            (let [binded-var (get frame binding-var binding-var)
+                  datom-var (get datom i)]
+              (if (is-binding-var binding-var)
+                (assoc frame binding-var datom-var)
 
-                               (let [binded-var (get frame binding-var binding-var)
-                                     datom-var (get datom i)]
-                                 (if (is-binding-var binding-var)
-                                   (assoc frame binding-var datom-var)
-
-                                   (if (= datom-var binded-var)
-                                     frame
-                                     (reduced nil))))))
-                           frame (map-indexed vector pattern))]
-    (assoc frame :hash (hash-datom datom))))
+                (if (= datom-var binded-var)
+                  frame
+                  (reduced nil)))))
+          frame (map-indexed vector pattern)))
 
 (defn match-pattern
   [frame pattern datoms]
-  (reduce (fn [frames datom]
-            (if-let [frame (match-datom frame pattern datom)]
-              (conj frames frame)
-              frames))
-          [] datoms))
+  (-> (reduce (fn [[frames seen] datom]
+                (let [hash (str (first datom) (second datom))]
+                  (if (seen hash)
+                    [frames seen]
+                    (if (= (last datom) :assert)
+                      (if-let [frame (match-datom frame pattern datom)]
+                        [(conj frames frame) (conj seen hash)]
+                        [frames (conj seen hash)])
+                      [frames (conj seen hash)]))))
+              [[] #{}] datoms)
+      first))
+
+(defn unify
+  [frame pattern]
+  (for [v pattern]
+    (get frame v v)))
 
 (defn q
   [db {:keys [find where]}]
-  (let [frames (reduce (fn [frames pattern]
-                         (mapcat #(match-pattern % pattern (load-datoms db pattern)) frames))
-                       [{}] where)
-
-        filtered-frames (->> frames
-                             (group-by :hash)
-                             (vals)
-                             (map last)
-                             (filter (fn [frame] (not= (:op frame) :retract))))]
-
-    (for [frame filtered-frames]
+  (let [frames (reduce
+                 (fn [frames pattern]
+                   (mapcat #(match-pattern % pattern (load-datoms
+                                                       db
+                                                       (unify % pattern))) frames))
+                 [{}] where)]
+    (for [frame frames]
       (for [f find]
         (get frame f)))))
 
@@ -176,12 +184,12 @@
                                        :surname "Carrettoni"}))
 
   (def entities (q db-after {:find  '[?eid]
-                             :where '[[?eid ?name "Gabriele"]]}))
+                             :where '[[?eid :name "Gabriele"]]}))
 
   (map (fn [[eid]] (entity-by-id db-after eid)) entities)
 
-  ;; ({:name "Gabriele", :surname "Carrettoni", :db/id "9b057e2a-a75c-4cb8-beab-b99256c2dafd"}
-  ;;  {:name "Gabriele", :surname "Cafarelli", :db/id "9de83d97-f550-4b2c-86c4-f9da6f8ce779"})
+  ;({:surname "Carrettoni", :name "Gabriele", :db/id "c58a34ee-243f-4f44-aa3a-01781dd2e73a"}
+  ;  {:surname "Cafarelli", :name "Gabriele", :db/id "2849662f-256e-49a8-a464-d4ac7a601d37"})
 
   (def entities (q db-after {:find  '[?eid]
                              :where '[[?eid :name "Gabriele"]
@@ -189,6 +197,24 @@
 
   (map (fn [[eid]] (entity-by-id db-after eid)) entities)
 
-  ;; ({:name "Gabriele", :surname "Cafarelli", :db/id "9de83d97-f550-4b2c-86c4-f9da6f8ce779"})
+  ;; ({:surname "Cafarelli", :name "Gabriele", :db/id "2849662f-256e-49a8-a464-d4ac7a601d37"})
 
+  (def db-after (transaction db-after {:name  "Giuseppe"
+                                       :db/id (ffirst entities)}))
+
+  (def entities (q db-after {:find  '[?eid]
+                             :where '[[?eid :name "Gabriele"]]}))
+
+  (map (fn [[eid]] (entity-by-id db-after eid)) entities)
+
+  ;; ({:surname "Carrettoni", :name "Gabriele", :db/id "c58a34ee-243f-4f44-aa3a-01781dd2e73a"})
+
+  (def db-after (transaction db-after [[:db.fn/retractEntity "c58a34ee-243f-4f44-aa3a-01781dd2e73a"]]))
+
+  (def entities (q db-after {:find  '[?eid]
+                             :where '[[?eid :name "Gabriele"]]}))
+
+  (map (fn [[eid]] (entity-by-id db-after eid)) entities)
+
+  ;; ()
   )
