@@ -35,7 +35,8 @@
     (loop [entity {}
            [[_ attr value _ op] & datoms] datoms]
       (if-not attr
-        (assoc entity :db/id eid)
+        (when-not (empty? entity)
+          (assoc entity :db/id eid))
 
         (case op
           :assert
@@ -121,18 +122,26 @@
     :else
     (all-datoms db)))
 
-(defn match-datom
-  [frame pattern datom]
-  (reduce (fn [frame [i binding-var]]
-            (let [binding-var (get frame binding-var binding-var)
-                  datom-var (get datom i)]
-              (if (is-binding-var binding-var)
-                (assoc frame binding-var datom-var)
+(defn hash-datom
+  [[e a v]]
+  (str e a v))
 
-                (if (= datom-var binding-var)
-                  frame
-                  (reduced nil)))))
-          frame (map-indexed vector pattern)))
+(defn match-datom
+  [frame pattern [_ _ _ _ op :as datom]]
+  (when-let [frame (reduce (fn [frame [i binding-var]]
+                             (if (= op :retract)
+                               (reduced {:op :retract})
+
+                               (let [binded-var (get frame binding-var binding-var)
+                                     datom-var (get datom i)]
+                                 (if (is-binding-var binding-var)
+                                   (assoc frame binding-var datom-var)
+
+                                   (if (= datom-var binded-var)
+                                     frame
+                                     (reduced nil))))))
+                           frame (map-indexed vector pattern))]
+    (assoc frame :hash (hash-datom datom))))
 
 (defn match-pattern
   [frame pattern datoms]
@@ -146,9 +155,15 @@
   [db {:keys [find where]}]
   (let [frames (reduce (fn [frames pattern]
                          (mapcat #(match-pattern % pattern (load-datoms db pattern)) frames))
-                       [{}] where)]
+                       [{}] where)
 
-    (for [frame frames]
+        filtered-frames (->> frames
+                             (group-by :hash)
+                             (vals)
+                             (map last)
+                             (filter (fn [frame] (not= (:op frame) :retract))))]
+
+    (for [frame filtered-frames]
       (for [f find]
         (get frame f)))))
 
