@@ -1,9 +1,10 @@
 (ns db
   (:import (java.nio.file Files Path)
-           (org.lmdbjava Env DbiFlags Dbi)
+           (org.lmdbjava Env DbiFlags Dbi PutFlags KeyRange Txn)
            (java.io File)
            (java.nio ByteBuffer)
-           (java.nio.charset StandardCharsets)))
+           (java.nio.charset StandardCharsets)
+           (java.util Iterator)))
 
 (defprotocol ADatom
   (to-eavt [this])
@@ -18,9 +19,16 @@
   (append-log [this datoms]))
 
 (defprotocol AConnection
-  (get-key [this key])
-  (put-key [this key data])
-  (del-key [this key])
+  (txn-read [this])
+  (txn-write [this])
+  (txn-commit [this txn])
+  (with-txn [this type fn])
+
+  (get-key [this key] [this txn key])
+  (put-key [this key vals] [this txn key vals])
+  (del-key [this key] [this txn key])
+  (iterate-key [this key fn] [this txn key fn])
+
   (close [this]))
 
 (defprotocol AStorage
@@ -37,40 +45,91 @@
 (def bkey (ByteBuffer/allocateDirect 511))
 (def bval (ByteBuffer/allocateDirect 2000))
 
-(defn key->bytes [data]
+(defn key->bytes
+  [data]
   (-> bkey
       (.put (.getBytes data "UTF-8"))
       (.flip))
   bkey)
 
-(defn val->bytes [data]
+(defn val->bytes
+  [data]
   (-> bval
       (.put (.getBytes data "UTF-8"))
       (.flip))
   bval)
 
-(defn clear [& xs]
+(defn clear
+  [& xs]
   (doseq [[^ByteBuffer x] xs]
     (.clear x)))
 
+(defn decode
+  [buff]
+  (str (.decode StandardCharsets/UTF_8 buff)))
+
 (deftype LmdbConnection [^Env env ^Dbi db]
   AConnection
-  (put-key [this key val]
-    (.put db (key->bytes key) (val->bytes val))
+  (txn-read [this]
+    (.txnRead env))
+
+  (txn-write [this]
+    (.txnWrite env))
+
+  (txn-commit [this txn]
+    (.commit txn))
+
+  (with-txn [this type fun]
+    (with-open [txn (case type
+                      :read
+                      (txn-read this)
+
+                      :write
+                      (txn-write this))]
+      (let [res (fun txn)]
+        (when (= type :write)
+          (txn-commit this txn))
+        res)))
+
+  (put-key [this key vals]
+    (with-txn this :write (fn [txn] (put-key this txn key vals))))
+
+  (put-key [this txn key vals]
+    (key->bytes key)
+    (doseq [val vals]
+      (.put db txn bkey (val->bytes val) (into-array PutFlags []))
+      (clear [bval]))
     (clear [bkey bval]))
 
   (get-key [this key]
-    (with-open [txn (.txnRead env)]
-      (if-let [val (.get db txn (key->bytes key))]
-        (let [decoded (str (.decode (StandardCharsets/UTF_8) val))]
-          (clear [bkey bval])
-          decoded)
-        (clear [bkey bval]))))
+    (with-txn this :read (fn [txn] (get-key this txn key))))
+
+  (get-key [this txn key]
+    (key->bytes key)
+    (with-open [^Iterator it (.iterate db txn (KeyRange/closed bkey bkey))]
+      (let [vals (volatile! [])]
+        (while (.hasNext it)
+          (vswap! vals (fn [vals] (conj vals (decode (.val (.next it)))))))
+        (clear [bkey])
+        @vals)))
+
+  (iterate-key [this txn key fun]
+    (key->bytes key)
+    (with-open [^Iterator it (.iterate db txn (KeyRange/closed bkey bkey))]
+      (while (.hasNext it)
+        (let [val (decode (.val (.next it)))]
+          (fun it key val))))
+    (clear [bkey]))
+
+  (iterate-key [this key fun]
+    (with-txn this :write (fn [txn] (iterate-key this txn key fun))))
+
+  (del-key [this txn key]
+    (.delete db txn (key->bytes key))
+    (clear [bkey]))
 
   (del-key [this key]
-    (.delete db (key->bytes key))
-    (.clear bkey)
-    nil)
+    (with-txn this :write (fn [txn] (del-key this txn key))))
 
   (close [this]
     (.close env)))
