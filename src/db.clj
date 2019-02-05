@@ -28,6 +28,8 @@
   (get-key [this key] [this txn key])
   (put-key [this key vals] [this txn key vals])
   (del-key [this key] [this txn key])
+  (del-kv [this key val] [this txn key val])
+
   (iterate-key [this key fun] [this txn key fun])
 
   (close [this]))
@@ -120,6 +122,12 @@
 
   (del-key [this key]
     (with-txn this :write (fn [txn] (del-key this txn key))))
+
+  (del-kv [this txn key val]
+    (.delete db txn (encode-key key) (encode-val val)))
+
+  (del-kv [this key val]
+    (with-txn this :write (fn [txn] (del-kv this txn key val))))
 
   (close [this]
     (.close env)))
