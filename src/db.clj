@@ -1,4 +1,5 @@
 (ns db
+  (:require [clojure.data.fressian :as fress])
   (:import (java.nio.file Files Path)
            (org.lmdbjava Env DbiFlags Dbi PutFlags KeyRange Txn)
            (java.io File)
@@ -22,12 +23,12 @@
   (txn-read [this])
   (txn-write [this])
   (txn-commit [this txn])
-  (with-txn [this type fn])
+  (with-txn [this type fun])
 
   (get-key [this key] [this txn key])
   (put-key [this key vals] [this txn key vals])
   (del-key [this key] [this txn key])
-  (iterate-key [this key fn] [this txn key fn])
+  (iterate-key [this key fun] [this txn key fun])
 
   (close [this]))
 
@@ -45,28 +46,23 @@
 (def bkey (ByteBuffer/allocateDirect 511))
 (def bval (ByteBuffer/allocateDirect 2000))
 
-(defn key->bytes
+(defn encode-key
   [data]
-  (-> bkey
-      (.put (.getBytes data "UTF-8"))
-      (.flip))
-  bkey)
+  (doto bkey
+    (.clear)
+    (.put (.getBytes data StandardCharsets/UTF_8))
+    (.flip)))
 
-(defn val->bytes
+(defn encode-val
   [data]
-  (-> bval
-      (.put (.getBytes data "UTF-8"))
-      (.flip))
-  bval)
-
-(defn clear
-  [& xs]
-  (doseq [[^ByteBuffer x] xs]
-    (.clear x)))
+  (doto bval
+    (.clear)
+    (.put (fress/write data))
+    (.flip)))
 
 (defn decode
-  [buff]
-  (str (.decode StandardCharsets/UTF_8 buff)))
+  [data]
+  (fress/read data))
 
 (deftype LmdbConnection [^Env env ^Dbi db]
   AConnection
@@ -95,38 +91,32 @@
     (with-txn this :write (fn [txn] (put-key this txn key vals))))
 
   (put-key [this txn key vals]
-    (key->bytes key)
     (doseq [val vals]
-      (.put db txn bkey (val->bytes val) (into-array PutFlags []))
-      (clear [bval]))
-    (clear [bkey bval]))
+      (.put db txn (encode-key key) (encode-val val) (into-array PutFlags []))))
 
   (get-key [this key]
     (with-txn this :read (fn [txn] (get-key this txn key))))
 
   (get-key [this txn key]
-    (key->bytes key)
-    (with-open [^Iterator it (.iterate db txn (KeyRange/closed bkey bkey))]
-      (let [vals (volatile! [])]
-        (while (.hasNext it)
-          (vswap! vals (fn [vals] (conj vals (decode (.val (.next it)))))))
-        (clear [bkey])
-        @vals)))
+    (let [ekey (encode-key key)]
+      (with-open [^Iterator it (.iterate db txn (KeyRange/closed ekey ekey))]
+        (let [vals (volatile! [])]
+          (while (.hasNext it)
+            (vswap! vals (fn [vals] (conj vals (decode (.val (.next it)))))))
+          @vals))))
 
   (iterate-key [this txn key fun]
-    (key->bytes key)
-    (with-open [^Iterator it (.iterate db txn (KeyRange/closed bkey bkey))]
-      (while (.hasNext it)
-        (let [val (decode (.val (.next it)))]
-          (fun it key val))))
-    (clear [bkey]))
+    (let [ekey (encode-key key)]
+      (with-open [^Iterator it (.iterate db txn (KeyRange/closed ekey ekey))]
+        (while (.hasNext it)
+          (let [val (decode (.val (.next it)))]
+            (fun it key val))))))
 
   (iterate-key [this key fun]
     (with-txn this :write (fn [txn] (iterate-key this txn key fun))))
 
   (del-key [this txn key]
-    (.delete db txn (key->bytes key))
-    (clear [bkey]))
+    (.delete db txn (encode-key key)))
 
   (del-key [this key]
     (with-txn this :write (fn [txn] (del-key this txn key))))
