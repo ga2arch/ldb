@@ -1,6 +1,9 @@
 (ns core
   (:import (java.util UUID)))
 
+
+;;
+
 (def db {:eavt     {}
          :aevt     {}
          :last-tid 0})
