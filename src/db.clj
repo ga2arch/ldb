@@ -12,7 +12,10 @@
   (to-eavt [this])
   (to-aevt [this]))
 
-(defrecord Datom [eid attr value tid op])
+(defrecord Datom [eid attr value tid op]
+  ADatom
+  (to-eavt [this] [eid attr value tid op])
+  (to-aevt [this] [attr eid value tid op]))
 
 (def bkey (ByteBuffer/allocateDirect 511))
 (def bval (ByteBuffer/allocateDirect 2000))
@@ -21,7 +24,7 @@
   [data]
   (doto bkey
     (.clear)
-    (.put (.getBytes data StandardCharsets/UTF_8))
+    (.put (.getBytes (if (keyword? data) (name data) data) StandardCharsets/UTF_8))
     (.flip)))
 
 (defn encode-val
@@ -48,11 +51,11 @@
   (.commit txn))
 
 (defn put-key
-  [{db :db} txn key val]
+  [db txn key val]
   (.put db txn (encode-key key) (encode-val val) (into-array PutFlags [])))
 
 (defn get-key
-  ([{db :db} txn]
+  ([db txn]
    (fn [rf]
      (fn
        ([] (rf))
@@ -65,13 +68,13 @@
                         (if (reduced? res)
                           res
                           (if (.hasNext it)
-                            (recur (rf result [input (decode (.val (.next it)))]))
+                            (recur (rf result (decode (.val (.next it)))))
                             res)))]
               (ensure-reduced res))
             (finally
               (.close it))))))))
 
-  ([{db :db} txn key]
+  ([db txn key]
    (reify IReduceInit
      (reduce [this f init]
        (let [ekey (encode-key key)
@@ -81,17 +84,17 @@
              (if (reduced? state)
                @state
                (if (.hasNext it)
-                 (recur (f state [key (decode (.val (.next it)))]))
+                 (recur (f state (decode (.val (.next it)))))
                  state)))
            (finally
              (.close it))))))))
 
 (defn del-key
-  [{db :db} txn key]
+  [db txn key]
   (.delete db txn (encode-key key)))
 
 (defn del-kv
-  [{db :db} txn key val]
+  [db txn key val]
   (.delete db txn (encode-key key) (encode-val val)))
 
 (defn close
@@ -100,16 +103,21 @@
 
 
 (defn open-connection
-  [{:db/keys [name filepath]}]
+  [{:db/keys [filepath]}]
   (let [env (-> (Env/create)
                 (.setMapSize 10485760)
-                (.setMaxDbs 5)
-                (.open filepath nil))
-        db (.openDbi env name (into-array DbiFlags [DbiFlags/MDB_CREATE DbiFlags/MDB_DUPSORT]))]
-    {:env env
-     :db  db}))
+                (.setMaxDbs 6)
+                (.open filepath nil))]
+    (letfn [(open-db [name]
+              (.openDbi env name (into-array DbiFlags [DbiFlags/MDB_CREATE DbiFlags/MDB_DUPSORT])))]
+      {:env          env
+       :eavt-current (open-db "eavt-current")
+       :eavt-history (open-db "eavt-history")
+       :aevt-current (open-db "aevt-current")
+       :aevt-history (open-db "aevt-history")
+       :status       (open-db "status")})))
 
-(def db {:db/name "prova" :db/filepath (File. ".")})
+(def db {:db/filepath (File. ".")})
 (def conn (open-connection db))
 
 (defn transact
@@ -127,6 +135,64 @@
   (with-open [txn (txn-read conn)]
     (transact conn txn xf coll)))
 
-
 ;;
 
+(defn entity-by-id
+  [conn eid]
+  (with-open [txn (txn-read conn)]
+    (let [xf (map (fn [[_ attr value _ _]] [attr value]))]
+      (into {} xf (get-key (:eavt-current conn) txn eid)))))
+
+(defn data->actions
+  [conn data]
+  (cond
+    (map? data)
+    (let [eid (or (:db/id data) (str (UUID/randomUUID)))
+          entity (entity-by-id conn eid)]
+      (for [[attr value] data
+            :let [old-value (get entity attr)]
+            :when (and (not= attr :db/id)
+                       (not= value old-value))]
+        (if old-value
+          [[:db/retract eid attr old-value]
+           [:db/add eid attr value]]
+
+          [[:db/add eid attr value]])))
+
+    (vector? data)
+    (let [[action eid :as all] data]
+      (case action
+        :db.fn/retractEntity
+        (if-let [entity (entity-by-id conn eid)]
+          (for [[attr value] entity
+                :when (not= attr :db/id)]
+            [:db/retract eid attr value])
+          (throw (ex-info "entity not found" {:eid eid})))
+
+        :db/add
+        [[all]]
+
+        :db/retract
+        [[all]]))))
+
+(defn get-last-tid
+  [conn]
+  (let [tid (with-open [txn (txn-read conn)]
+              (first (into [] (get-key (:status conn) txn :last-tid))))]
+    (or tid 0)))
+
+(defn transaction
+  [conn data]
+  (let [tx-data (:tx-data data)
+        tid (get-last-tid conn)]
+    (with-open [txn (txn-write conn)]
+      (let [xf (comp
+                 (mapcat (partial data->actions conn))
+                 cat
+                 (map (fn [[action eid attr value]] (Datom. eid attr value tid (= :db/add action))))
+                 (map (fn [datom]
+                        (put-key (:eavt-current conn) txn (.-eid datom) (to-eavt datom))
+                        (put-key (:aevt-current conn) txn (.-eid datom) (to-aevt datom)))))]
+        (doall (sequence xf tx-data))
+        (put-key (:status conn) txn :last-tid (inc tid))
+        (txn-commit txn)))))
