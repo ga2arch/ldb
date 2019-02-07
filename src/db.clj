@@ -63,6 +63,16 @@
   [db txn key val]
   (.put db txn (encode-key key) (encode-val val) (into-array PutFlags [])))
 
+(defn get-keys
+  [db txn]
+  (let [^CursorIterator it (.iterate db txn (KeyRange/all))]
+    (let [vals (volatile! {})]
+      (while (.hasNext it)
+        (let [kv (.next it)]
+          (vswap! vals (fn [vals] (update vals (str (.decode StandardCharsets/UTF_8 (.key kv)))
+                                          (fn [a] ((fnil conj []) a (decode (.val kv)))))))))
+      (into {} @vals))))
+
 (defn get-key
   ([db txn]
    (fn [rf]
@@ -202,7 +212,7 @@
                                   (= (.-eid d) (.-eid datom))
                                   (= (.-attr d) (.-attr datom))
                                   (= (.-value d) (.-value datom))))))]
-    (transduce xf identity nil (get-key (:eavt-current conn) txn (.-eid datom)))))
+    (transduce xf conj [] (get-key (:eavt-current conn) txn (.-eid datom)))))
 
 (defn transaction
   [conn data]
@@ -228,3 +238,11 @@
         (into [] xf tx-data)
         (put-key (:status conn) txn :last-tid (inc tid))
         (txn-commit txn)))))
+
+(defn show-db
+  [{:keys [eavt-current eavt-history aevt-current aevt-history] :as conn}]
+  (with-open [txn (txn-read conn)]
+    {:eavt {:current (get-keys eavt-current txn)
+            :history (get-keys eavt-history txn)}
+     :aevt {:current (get-keys aevt-current txn)
+            :history (get-keys aevt-history txn)}}))
