@@ -22,10 +22,19 @@
 
 (defn encode-key
   [data]
-  (doto bkey
-    (.clear)
-    (.put (.getBytes (if (keyword? data) (name data) data) StandardCharsets/UTF_8))
-    (.flip)))
+  (.clear bkey)
+
+  (cond
+    (keyword? data)
+    (.put bkey (.getBytes (name data) StandardCharsets/UTF_8))
+
+    (string? data)
+    (.put bkey (.getBytes data StandardCharsets/UTF_8))
+
+    (int? data)
+    (.putInt bkey data))
+
+  (.flip bkey))
 
 (defn encode-val
   [data]
@@ -115,7 +124,7 @@
        :eavt-history (open-db "eavt-history")
        :aevt-current (open-db "aevt-current")
        :aevt-history (open-db "aevt-history")
-       :status       (open-db "status")})))
+       :status       (.openDbi env "status" (into-array DbiFlags [DbiFlags/MDB_CREATE]))})))
 
 (def db {:db/filepath (File. ".")})
 (def conn (open-connection db))
@@ -181,6 +190,20 @@
               (first (into [] (get-key (:status conn) txn :last-tid))))]
     (or tid 0)))
 
+(defn from-eavt
+  [[eid attr value tid op]]
+  (Datom. eid attr value tid op))
+
+(defn find-datom
+  [conn txn datom]
+  (let [xf (comp
+             (map from-eavt)
+             (halt-when (fn [d] (and
+                                  (= (.-eid d) (.-eid datom))
+                                  (= (.-attr d) (.-attr datom))
+                                  (= (.-value d) (.-value datom))))))]
+    (transduce xf identity nil (get-key (:eavt-current conn) txn (.-eid datom)))))
+
 (defn transaction
   [conn data]
   (let [tx-data (:tx-data data)
@@ -191,8 +214,17 @@
                  cat
                  (map (fn [[action eid attr value]] (Datom. eid attr value tid (= :db/add action))))
                  (map (fn [datom]
-                        (put-key (:eavt-current conn) txn (.-eid datom) (to-eavt datom))
-                        (put-key (:aevt-current conn) txn (.-eid datom) (to-aevt datom)))))]
-        (doall (sequence xf tx-data))
+                        (if (.-op datom)
+                          (do
+                            (put-key (:eavt-current conn) txn (.-eid datom) (to-eavt datom))
+                            (put-key (:aevt-current conn) txn (.-attr datom) (to-aevt datom)))
+
+                          (let [to-retract (find-datom conn txn datom)]
+                            (put-key (:eavt-history conn) txn (.-eid datom) (to-eavt datom))
+                            (put-key (:aevt-history conn) txn (.-attr datom) (to-aevt datom))
+
+                            (del-kv (:eavt-current conn) txn (.-eid to-retract) (to-eavt to-retract))
+                            (del-kv (:aevt-current conn) txn (.-attr to-retract) (to-aevt to-retract)))))))]
+        (into [] xf tx-data)
         (put-key (:status conn) txn :last-tid (inc tid))
         (txn-commit txn)))))
