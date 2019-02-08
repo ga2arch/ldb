@@ -1,6 +1,6 @@
 (ns ldb.db
   (:require [clojure.data.fressian :as fress])
-  (:import (org.lmdbjava Env DbiFlags PutFlags KeyRange CursorIterator)
+  (:import (org.lmdbjava Env DbiFlags PutFlags KeyRange CursorIterator Dbi)
            (java.io File)
            (java.nio ByteBuffer)
            (java.util UUID)
@@ -57,39 +57,25 @@
       (into {} @vals))))
 
 (defn get-key
-  ([db txn]
-   (fn [rf]
-     (fn
-       ([] (rf))
-       ([result] (rf result))
-       ([result input]
-        (let [ekey (encode-key input)
-              ^CursorIterator it (.iterate db txn (KeyRange/closed ekey ekey))]
-          (try
-            (let [res (loop [res result]
-                        (if (reduced? res)
-                          res
-                          (if (.hasNext it)
-                            (recur (rf result (decode (.val (.next it)))))
-                            res)))]
-              (ensure-reduced res))
-            (finally
-              (.close it))))))))
+  [^Dbi db txn key]
+  (when-let [v (.get db txn (encode-key key))]
+    (decode v)))
 
-  ([db txn key]
-   (reify IReduceInit
-     (reduce [this f init]
-       (let [ekey (encode-key key)
-             ^CursorIterator it (.iterate db txn (KeyRange/closed ekey ekey))]
-         (try
-           (loop [state init]
-             (if (reduced? state)
-               @state
-               (if (.hasNext it)
-                 (recur (f state (decode (.val (.next it)))))
-                 state)))
-           (finally
-             (.close it))))))))
+(defn scan-key
+  [db txn key]
+  (reify IReduceInit
+    (reduce [this f init]
+      (let [ekey (encode-key key)
+            ^CursorIterator it (.iterate db txn (KeyRange/closed ekey ekey))]
+        (try
+          (loop [state init]
+            (if (reduced? state)
+              @state
+              (if (.hasNext it)
+                (recur (f state (decode (.val (.next it)))))
+                state)))
+          (finally
+            (.close it)))))))
 
 (defn del-key
   [db txn key]
@@ -102,7 +88,6 @@
 (defn close
   [{env :env}]
   (.close env))
-
 
 (defn connect
   [filepath]
@@ -119,28 +104,13 @@
        :aevt-history (open-db "aevt-history")
        :status       (.openDbi env "status" (into-array DbiFlags [DbiFlags/MDB_CREATE]))})))
 
-(defn transact
-  [conn txn xform-f coll]
-  (try
-    (let [res (into [] (xform-f conn txn) coll)]
-      (when-not (.isReadOnly txn)
-        (txn-commit txn))
-      res)
-    (finally
-      (.close txn))))
-
-(defn tx-read
-  [conn xf coll]
-  (with-open [txn (txn-read conn)]
-    (transact conn txn xf coll)))
-
 ;;
 
 (defn entity-by-id
   [conn eid]
   (with-open [txn (txn-read conn)]
     (let [xf (map (fn [[_ attr value _ _]] [attr value]))]
-      (into {:db/id eid} xf (get-key (:eavt-current conn) txn eid)))))
+      (into {:db/id eid} xf (scan-key (:eavt-current conn) txn eid)))))
 
 (defn data->actions
   [conn tid data]
@@ -178,7 +148,7 @@
 (defn get-last-tid
   [conn]
   (let [tid (with-open [txn (txn-read conn)]
-              (first (into [] (get-key (:status conn) txn :last-tid))))]
+              (get-key (:status conn) txn :last-tid))]
     (or tid 0)))
 
 (defn find-datom
@@ -186,7 +156,7 @@
   (let [xf (comp
              (filter (fn [[ceid cattr cvalue]] (and (= ceid eid) (= cattr attr) (= cvalue value))))
              (halt-when any?))]
-    (transduce xf identity nil (get-key (:eavt-current conn) txn eid))))
+    (transduce xf identity nil (scan-key (:eavt-current conn) txn eid))))
 
 (defn update-indexes
   [conn txn [eid attr _ _ op :as datom]]
@@ -231,11 +201,11 @@
 
 (defn datoms-by-eid [conn eid]
   (with-open [txn (txn-read conn)]
-    (into [] (get-key (:eavt-current conn) txn eid))))
+    (into [] (scan-key (:eavt-current conn) txn eid))))
 
 (defn datoms-by-attr [conn attr]
   (with-open [txn (txn-read conn)]
-    (into [] (get-key (:aevt-current conn) txn attr))))
+    (into [] (scan-key (:aevt-current conn) txn attr))))
 
 (defn all-datoms [conn]
   (with-open [txn (txn-read conn)]
