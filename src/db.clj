@@ -214,6 +214,20 @@
                                   (= (.-value d) (.-value datom))))))]
     (transduce xf conj [] (get-key (:eavt-current conn) txn (.-eid datom)))))
 
+(defn update-indexes
+  [txn datom]
+  (if (.-op datom)
+    (do
+      (put-key (:eavt-current conn) txn (.-eid datom) (to-eavt datom))
+      (put-key (:aevt-current conn) txn (.-attr datom) (to-aevt datom)))
+
+    (let [to-retract (find-datom conn txn datom)]
+      (put-key (:eavt-history conn) txn (.-eid datom) (to-eavt datom))
+      (put-key (:aevt-history conn) txn (.-attr datom) (to-aevt datom))
+
+      (del-kv (:eavt-current conn) txn (.-eid to-retract) (to-eavt to-retract))
+      (del-kv (:aevt-current conn) txn (.-attr to-retract) (to-aevt to-retract)))))
+
 (defn transaction
   [conn data]
   (let [tx-data (:tx-data data)
@@ -223,18 +237,7 @@
                  (mapcat (partial data->actions conn))
                  cat
                  (map (fn [[action eid attr value]] (Datom. eid attr value tid (= :db/add action))))
-                 (map (fn [datom]
-                        (if (.-op datom)
-                          (do
-                            (put-key (:eavt-current conn) txn (.-eid datom) (to-eavt datom))
-                            (put-key (:aevt-current conn) txn (.-attr datom) (to-aevt datom)))
-
-                          (let [to-retract (find-datom conn txn datom)]
-                            (put-key (:eavt-history conn) txn (.-eid datom) (to-eavt datom))
-                            (put-key (:aevt-history conn) txn (.-attr datom) (to-aevt datom))
-
-                            (del-kv (:eavt-current conn) txn (.-eid to-retract) (to-eavt to-retract))
-                            (del-kv (:aevt-current conn) txn (.-attr to-retract) (to-aevt to-retract)))))))]
+                 (map (partial update-indexes txn)))]
         (into [] xf tx-data)
         (put-key (:status conn) txn :last-tid (inc tid))
         (txn-commit txn)))))
