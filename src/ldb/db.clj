@@ -1,21 +1,10 @@
-(ns db
+(ns ldb.db
   (:require [clojure.data.fressian :as fress])
-  (:import (java.nio.file Files Path)
-           (org.lmdbjava Env DbiFlags Dbi PutFlags KeyRange Txn CursorIterator)
+  (:import (org.lmdbjava Env DbiFlags PutFlags KeyRange CursorIterator)
            (java.io File)
            (java.nio ByteBuffer)
-           (java.nio.charset StandardCharsets)
-           (java.util Iterator UUID)
+           (java.util UUID)
            (clojure.lang IReduceInit)))
-
-(defprotocol ADatom
-  (to-eavt [this])
-  (to-aevt [this]))
-
-(defrecord Datom [eid attr value tid op]
-  ADatom
-  (to-eavt [this] [eid attr value tid op])
-  (to-aevt [this] [attr eid value tid op]))
 
 (def bkey (ByteBuffer/allocateDirect 511))
 (def bval (ByteBuffer/allocateDirect 2000))
@@ -23,17 +12,11 @@
 (defn encode-key
   [data]
   (.clear bkey)
-
   (cond
-    (keyword? data)
-    (.put bkey (.getBytes (name data) StandardCharsets/UTF_8))
-
-    (string? data)
-    (.put bkey (.getBytes data StandardCharsets/UTF_8))
-
     (int? data)
-    (.putInt bkey data))
-
+    (.putInt bkey data)
+    :else
+    (.put bkey (fress/write data)))
   (.flip bkey))
 
 (defn encode-val
@@ -69,7 +52,7 @@
     (let [vals (volatile! {})]
       (while (.hasNext it)
         (let [kv (.next it)]
-          (vswap! vals (fn [vals] (update vals (str (.decode StandardCharsets/UTF_8 (.key kv)))
+          (vswap! vals (fn [vals] (update vals (decode (.key kv))
                                           (fn [a] ((fnil conj []) a (decode (.val kv)))))))))
       (into {} @vals))))
 
@@ -121,12 +104,12 @@
   (.close env))
 
 
-(defn open-connection
-  [{:db/keys [filepath]}]
+(defn connect
+  [filepath]
   (let [env (-> (Env/create)
                 (.setMapSize 10485760)
                 (.setMaxDbs 6)
-                (.open filepath nil))]
+                (.open (File. filepath) nil))]
     (letfn [(open-db [name]
               (.openDbi env name (into-array DbiFlags [DbiFlags/MDB_CREATE DbiFlags/MDB_DUPSORT])))]
       {:env          env
@@ -135,9 +118,6 @@
        :aevt-current (open-db "aevt-current")
        :aevt-history (open-db "aevt-history")
        :status       (.openDbi env "status" (into-array DbiFlags [DbiFlags/MDB_CREATE]))})))
-
-(def db {:db/filepath (File. ".")})
-(def conn (open-connection db))
 
 (defn transact
   [conn txn xform-f coll]
@@ -160,39 +140,40 @@
   [conn eid]
   (with-open [txn (txn-read conn)]
     (let [xf (map (fn [[_ attr value _ _]] [attr value]))]
-      (into {} xf (get-key (:eavt-current conn) txn eid)))))
+      (into {:db/id eid} xf (get-key (:eavt-current conn) txn eid)))))
 
 (defn data->actions
-  [conn data]
+  [conn tid data]
   (cond
     (map? data)
     (let [eid (or (:db/id data) (str (UUID/randomUUID)))
           entity (entity-by-id conn eid)]
+
       (for [[attr value] data
             :let [old-value (get entity attr)]
             :when (and (not= attr :db/id)
                        (not= value old-value))]
         (if old-value
-          [[:db/retract eid attr old-value]
-           [:db/add eid attr value]]
+          [[eid attr old-value tid false]
+           [eid attr value tid true]]
 
-          [[:db/add eid attr value]])))
+          [[eid attr value tid true]])))
 
     (vector? data)
-    (let [[action eid :as all] data]
+    (let [[action eid attr value] data]
       (case action
         :db.fn/retractEntity
         (if-let [entity (entity-by-id conn eid)]
           (for [[attr value] entity
                 :when (not= attr :db/id)]
-            [:db/retract eid attr value])
+            [[eid attr value tid false]])
           (throw (ex-info "entity not found" {:eid eid})))
 
         :db/add
-        [[all]]
+        [[action eid attr value true]]
 
         :db/retract
-        [[all]]))))
+        [[action eid attr value false]]))))
 
 (defn get-last-tid
   [conn]
@@ -200,33 +181,26 @@
               (first (into [] (get-key (:status conn) txn :last-tid))))]
     (or tid 0)))
 
-(defn from-eavt
-  [[eid attr value tid op]]
-  (Datom. eid attr value tid op))
-
 (defn find-datom
-  [conn txn datom]
+  [conn txn [eid attr value]]
   (let [xf (comp
-             (map from-eavt)
-             (halt-when (fn [d] (and
-                                  (= (.-eid d) (.-eid datom))
-                                  (= (.-attr d) (.-attr datom))
-                                  (= (.-value d) (.-value datom))))))]
-    (transduce xf conj [] (get-key (:eavt-current conn) txn (.-eid datom)))))
+             (filter (fn [[ceid cattr cvalue]] (and (= ceid eid) (= cattr attr) (= cvalue value))))
+             (halt-when any?))]
+    (transduce xf identity nil (get-key (:eavt-current conn) txn eid))))
 
 (defn update-indexes
-  [txn datom]
-  (if (.-op datom)
+  [conn txn [eid attr _ _ op :as datom]]
+  (if op
     (do
-      (put-key (:eavt-current conn) txn (.-eid datom) (to-eavt datom))
-      (put-key (:aevt-current conn) txn (.-attr datom) (to-aevt datom)))
+      (put-key (:eavt-current conn) txn eid datom)
+      (put-key (:aevt-current conn) txn attr datom))
 
-    (let [to-retract (find-datom conn txn datom)]
-      (put-key (:eavt-history conn) txn (.-eid datom) (to-eavt datom))
-      (put-key (:aevt-history conn) txn (.-attr datom) (to-aevt datom))
+    (let [[reid rattr :as to-retract] (find-datom conn txn datom)]
+      (put-key (:eavt-history conn) txn eid datom)
+      (put-key (:aevt-history conn) txn attr datom)
 
-      (del-kv (:eavt-current conn) txn (.-eid to-retract) (to-eavt to-retract))
-      (del-kv (:aevt-current conn) txn (.-attr to-retract) (to-aevt to-retract)))))
+      (del-kv (:eavt-current conn) txn reid to-retract)
+      (del-kv (:aevt-current conn) txn rattr to-retract))))
 
 (defn transaction
   [conn data]
@@ -234,10 +208,9 @@
         tid (get-last-tid conn)]
     (with-open [txn (txn-write conn)]
       (let [xf (comp
-                 (mapcat (partial data->actions conn))
+                 (mapcat (partial data->actions conn tid))
                  cat
-                 (map (fn [[action eid attr value]] (Datom. eid attr value tid (= :db/add action))))
-                 (map (partial update-indexes txn)))]
+                 (map (partial update-indexes conn txn)))]
         (into [] xf tx-data)
         (put-key (:status conn) txn :last-tid (inc tid))
         (txn-commit txn)))))
@@ -249,3 +222,72 @@
             :history (get-keys eavt-history txn)}
      :aevt {:current (get-keys aevt-current txn)
             :history (get-keys aevt-history txn)}}))
+
+;; query
+
+(defn is-binding-var
+  [x]
+  (.startsWith (name x) "?"))
+
+(defn datoms-by-eid [conn eid]
+  (with-open [txn (txn-read conn)]
+    (into [] (get-key (:eavt-current conn) txn eid))))
+
+(defn datoms-by-attr [conn attr]
+  (with-open [txn (txn-read conn)]
+    (into [] (get-key (:aevt-current conn) txn attr))))
+
+(defn all-datoms [conn]
+  (with-open [txn (txn-read conn)]
+    (into [] (mapcat second) (get-keys (:aevt-current conn) txn))))
+
+(defn load-datoms
+  [conn [eid attr _]]
+  (cond
+    (not (is-binding-var eid))
+    (datoms-by-eid conn eid)
+
+    (not (is-binding-var attr))
+    (datoms-by-attr conn attr)
+
+    :else
+    (all-datoms conn)))
+
+(defn match-datom
+  [frame pattern datom]
+  (reduce (fn [frame [i binding-var]]
+            (let [binded-var (get frame binding-var binding-var)
+                  datom-var (nth datom i)]
+              (if (is-binding-var binding-var)
+                (assoc frame binding-var datom-var)
+
+                (if (= datom-var binded-var)
+                  frame
+                  (reduced nil)))))
+          frame (map-indexed vector pattern)))
+
+(defn match-pattern
+  [frame pattern datoms]
+  (reduce (fn [frames datom]
+            (if (last datom)
+              (if-let [frame (match-datom frame pattern datom)]
+                (conj frames frame)
+                frames)
+              frames)) [] datoms))
+
+(defn unify
+  [frame pattern]
+  (map (fn [var] (get frame var var)) pattern))
+
+(defn entities-by-id [conn eids]
+  (map (fn [[eid]] (entity-by-id conn eid)) eids))
+
+(defn q
+  [conn {:keys [find where]}]
+  (let [frames (reduce
+                 (fn [frames pattern]
+                   (mapcat #(match-pattern % pattern (load-datoms conn (unify % pattern))) frames))
+                 [{}] where)]
+    (for [frame frames]
+      (for [f find]
+        (get frame f)))))
