@@ -92,7 +92,7 @@
 (defn connect
   [filepath]
   (let [env (-> (Env/create)
-                (.setMapSize 10485760)
+                (.setMapSize 1099511627776)
                 (.setMaxDbs 6)
                 (.open (File. filepath) nil))]
     (letfn [(open-db [name]
@@ -271,9 +271,9 @@
   [conn {:keys [find where]}]
   (letfn [(reducing-fn
             [txn frames pattern]
-            (mapcat (fn [frame]
-                      (let [datoms (load-datoms conn txn (unify frame pattern))]
-                        (into [] (match-pattern frame pattern) datoms))) frames))]
+            (into [] (mapcat (fn [frame]
+                               (let [datoms (load-datoms conn txn (unify frame pattern))]
+                                 (into [] (match-pattern frame pattern) datoms)))) frames))]
 
     (let [frames (with-open [txn (txn-read conn)]
                    (reduce (partial reducing-fn txn) [{}] where))]

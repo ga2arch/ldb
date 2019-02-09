@@ -4,6 +4,16 @@
 (def db ".")
 (def conn (d/connect db))
 
+(def records (mapv (fn [i]
+                     {:name    (str "Gabriele" i)
+                      :surname (str "Carrettoni" i)}) (range 100000)))
+
+(time (d/transaction conn {:tx-data records}))
+
+(time (d/entities-by-id conn (d/q conn {:find  '[?eid]
+                                        :where '[[?eid :name ?name]
+                                                 [?eid :surname "Carrettoni20"]]})))
+
 (comment
   (d/transaction conn {:tx-data [{:name    "Gabriele"
                                   :surname "Carrettoni"}
