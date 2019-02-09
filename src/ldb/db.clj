@@ -46,7 +46,7 @@
   [db txn key val]
   (.put db txn (encode-key key) (encode-val val) (into-array PutFlags [])))
 
-(defn get-keys
+(defn scan-all
   [db txn]
   (let [^CursorIterator it (.iterate db txn (KeyRange/all))]
     (let [vals (volatile! {})]
@@ -188,44 +188,62 @@
 (defn show-db
   [{:keys [eavt-current eavt-history aevt-current aevt-history] :as conn}]
   (with-open [txn (txn-read conn)]
-    {:eavt {:current (get-keys eavt-current txn)
-            :history (get-keys eavt-history txn)}
-     :aevt {:current (get-keys aevt-current txn)
-            :history (get-keys aevt-history txn)}}))
+    {:eavt {:current (scan-all eavt-current txn)
+            :history (scan-all eavt-history txn)}
+     :aevt {:current (scan-all aevt-current txn)
+            :history (scan-all aevt-history txn)}}))
 
 ;; query
 
 (defn is-binding-var
   [x]
-  (.startsWith (name x) "?"))
-
-(defn datoms-by-eid [conn eid]
-  (with-open [txn (txn-read conn)]
-    (into [] (scan-key (:eavt-current conn) txn eid))))
-
-(defn datoms-by-attr [conn attr]
-  (with-open [txn (txn-read conn)]
-    (into [] (scan-key (:aevt-current conn) txn attr))))
-
-(defn all-datoms [conn]
-  (with-open [txn (txn-read conn)]
-    (into [] (mapcat second) (get-keys (:aevt-current conn) txn))))
+  (when x
+    (.startsWith (name x) "?")))
 
 (defn load-datoms
-  [conn [eid attr _]]
-  (cond
-    (not (is-binding-var eid))
-    (datoms-by-eid conn eid)
+  [conn txn [eid attr val]]
+  (let [filter-attr (filter (fn [[_ dattr _]] (= dattr attr)))
+        filter-val (filter (fn [[_ _ dval]] (= dval val)))]
+    (cond
+      (not (is-binding-var eid))
+      (cond
+        (and (not (is-binding-var attr))
+             (not (is-binding-var val)))
+        (eduction filter-attr
+                  filter-val
+                  (scan-key (:eavt-current conn) txn eid))
 
-    (not (is-binding-var attr))
-    (datoms-by-attr conn attr)
+        (not (is-binding-var attr))
+        (eduction filter-attr
+                  (scan-key (:eavt-current conn) txn eid))
 
-    :else
-    (all-datoms conn)))
+        (not (is-binding-var val))
+        (eduction filter-val
+                  (scan-key (:eavt-current conn) txn eid))
+
+        :else
+        (scan-key (:eavt-current conn) txn eid))
+
+      (not (is-binding-var attr))
+      (if-not (is-binding-var val)
+        (eduction filter-attr
+                  (scan-key (:aevt-current conn) txn attr))
+        (scan-key (:aevt-current conn) txn attr))
+
+      :else
+      (if-not (is-binding-var val)
+        (eduction
+          (mapcat second)
+          filter-val
+          (scan-all (:aevt-current conn) txn))
+
+        (eduction
+          (mapcat second)
+          (scan-all (:aevt-current conn) txn))))))
 
 (defn match-datom
   [frame pattern datom]
-  (reduce (fn [frame [i binding-var]]
+  (letfn [(reducing-fn [frame [i binding-var]]
             (let [binded-var (get frame binding-var binding-var)
                   datom-var (nth datom i)]
               (if (is-binding-var binding-var)
@@ -233,31 +251,32 @@
 
                 (if (= datom-var binded-var)
                   frame
-                  (reduced nil)))))
-          frame (map-indexed vector pattern)))
+                  (reduced nil)))))]
+    (reduce reducing-fn frame (map-indexed vector pattern))))
 
 (defn match-pattern
-  [frame pattern datoms]
-  (reduce (fn [frames datom]
-            (if (last datom)
-              (if-let [frame (match-datom frame pattern datom)]
-                (conj frames frame)
-                frames)
-              frames)) [] datoms))
+  [frame pattern]
+  (comp
+    (map (partial match-datom frame pattern))
+    (filter (comp not nil?))))
 
 (defn unify
   [frame pattern]
-  (map (fn [var] (get frame var var)) pattern))
+  (mapv #(get frame % %) pattern))
 
 (defn entities-by-id [conn eids]
   (map (fn [[eid]] (entity-by-id conn eid)) eids))
 
 (defn q
   [conn {:keys [find where]}]
-  (let [frames (reduce
-                 (fn [frames pattern]
-                   (mapcat #(match-pattern % pattern (load-datoms conn (unify % pattern))) frames))
-                 [{}] where)]
-    (for [frame frames]
-      (for [f find]
-        (get frame f)))))
+  (letfn [(reducing-fn
+            [txn frames pattern]
+            (mapcat (fn [frame]
+                      (let [datoms (load-datoms conn txn (unify frame pattern))]
+                        (into [] (match-pattern frame pattern) datoms))) frames))]
+
+    (let [frames (with-open [txn (txn-read conn)]
+                   (reduce (partial reducing-fn txn) [{}] where))]
+      (for [frame frames]
+        (for [f find]
+          (get frame f))))))
