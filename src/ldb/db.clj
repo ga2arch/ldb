@@ -124,7 +124,7 @@
 
   ([^Connection conn ^Txn txn eid]
    (let [xf (map (fn [[_ attr value _ _]] [attr value]))]
-     (into {:db/id eid} xf (scan-key (:eavt-current conn) txn eid)))))
+     (into {:db/id eid} xf (scan-key (.-eavt-current conn) txn eid)))))
 
 (defn get-and-inc
   [^Connection conn ^Txn txn key]
@@ -171,7 +171,7 @@
   (let [xf (comp
              (filter (fn [[ceid cattr cvalue]] (and (= ceid eid) (= cattr attr) (= cvalue value))))
              (halt-when any?))]
-    (transduce xf identity nil (scan-key (:eavt-current conn) txn eid))))
+    (transduce xf identity nil (scan-key (.-eavt-current conn) txn eid))))
 
 (defn update-indexes
   [^Connection conn ^Txn txn [eid attr _ _ op :as datom]]
@@ -226,35 +226,35 @@
              (not (is-binding-var val)))
         (eduction filter-attr
                   filter-val
-                  (scan-key (:eavt-current conn) txn eid))
+                  (scan-key (.-eavt-current conn) txn eid))
 
         (not (is-binding-var attr))
         (eduction filter-attr
-                  (scan-key (:eavt-current conn) txn eid))
+                  (scan-key (.-eavt-current conn) txn eid))
 
         (not (is-binding-var val))
         (eduction filter-val
-                  (scan-key (:eavt-current conn) txn eid))
+                  (scan-key (.-eavt-current conn) txn eid))
 
         :else
-        (scan-key (:eavt-current conn) txn eid))
+        (scan-key (.-eavt-current conn) txn eid))
 
       (not (is-binding-var attr))
       (if-not (is-binding-var val)
         (eduction filter-attr
-                  (scan-key (:aevt-current conn) txn attr))
-        (scan-key (:aevt-current conn) txn attr))
+                  (scan-key (.-aevt-current conn) txn attr))
+        (scan-key (.-aevt-current conn) txn attr))
 
       :else
       (if-not (is-binding-var val)
         (eduction
           (mapcat second)
           filter-val
-          (scan-all (:aevt-current conn) txn))
+          (scan-all (.-aevt-current conn) txn))
 
         (eduction
           (mapcat second)
-          (scan-all (:aevt-current conn) txn))))))
+          (scan-all (.-aevt-current conn) txn))))))
 
 (defn match-datom
   [frame pattern datom]
