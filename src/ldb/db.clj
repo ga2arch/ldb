@@ -4,7 +4,7 @@
            (java.io File)
            (java.nio ByteBuffer)
            (java.util UUID)
-           (clojure.lang IReduceInit)))
+           (clojure.lang IReduceInit Named)))
 
 (defrecord Connection [^Dbi eavt-current ^Dbi eavt-history
                        ^Dbi aevt-current ^Dbi aevt-history
@@ -177,7 +177,6 @@
   [^Connection conn ^Txn txn [eid attr _ _ op :as datom]]
   (if op
     (do
-      (println eid)
       (put-key (.-eavt-current conn) txn eid datom)
       (put-key (.-aevt-current conn) txn attr datom))
 
@@ -213,7 +212,7 @@
 
 (defn is-binding-var
   [x]
-  (when x
+  (when (instance? Named x)
     (.startsWith (name x) "?")))
 
 (defn load-datoms

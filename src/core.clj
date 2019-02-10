@@ -27,6 +27,7 @@
   (def entities (d/entities-by-id conn (d/q conn {:find  '[?eid]
                                                   :where '[[?eid :name "Gabriele"]]})))
 
+
   (d/transact conn {:tx-data [{:db/id   (:db/id (first entities)),
                                :name    "Giuseppe",
                                :surname "Cafarelli"}]})
