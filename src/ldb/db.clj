@@ -136,8 +136,9 @@
   [^Connection conn ^Txn txn ^Integer tid data]
   (cond
     (map? data)
-    (let [eid (get-and-inc conn txn :last-eid)
-          entity (entity-by-id conn txn eid)]
+    (let [[eid entity] (if-let [eid (:db/id data)]
+                         [eid (entity-by-id conn txn eid)]
+                         [(get-and-inc conn txn :last-eid) nil])]
 
       (for [[attr value] data
             :let [old-value (get entity attr)]
