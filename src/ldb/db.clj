@@ -188,7 +188,7 @@
   [^Connection conn data]
   (let [tx-data (:tx-data data)]
     (with-open [txn (txn-write conn)]
-      (let [tid (get-and-inc conn txn :last-tid)]
+      (let [tid (System/currentTimeMillis)]
         (let [xf (comp
                    (mapcat (partial data->datoms conn txn tid))
                    (map (partial update-indexes conn txn)))]
