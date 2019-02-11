@@ -254,16 +254,17 @@
 
 (defn match-datom
   [frame pattern datom]
-  (letfn [(reducing-fn [frame [i binding-var]]
-            (let [binded-var (get frame binding-var binding-var)
-                  datom-var (nth datom i)]
-              (if (is-binding-var binding-var)
-                (assoc frame binding-var datom-var)
-
-                (if (= datom-var binded-var)
-                  frame
-                  (reduced nil)))))]
-    (reduce reducing-fn frame (map-indexed vector pattern))))
+  (loop [i 0
+         frame frame]
+    (if (= i (count pattern))
+      frame
+      (let [binding-var (nth pattern i)
+            binded-value (get frame binding-var binding-var)
+            datom-value (nth datom i)]
+        (if (is-binding-var binding-var)
+          (recur (inc i) (assoc frame binding-var datom-value))
+          (when (= datom-value binded-value)
+            (recur (inc i) frame)))))))
 
 (defn match-pattern
   [frame pattern]
