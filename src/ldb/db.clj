@@ -54,7 +54,7 @@
 
 (defn scan-all
   ([^Dbi db ^Txn txn]
-    (scan-all db txn false))
+   (scan-all db txn false))
   ([^Dbi db ^Txn txn int-key?]
    (let [^CursorIterator it (.iterate db txn (KeyRange/all))]
      (let [vals (volatile! {})]
@@ -106,15 +106,14 @@
                      (.setMapSize 1099511627776)
                      (.setMaxDbs 6)
                      (.open (File. filepath) nil))]
-    (letfn [(open-db [name]
-              (.openDbi env name (into-array DbiFlags [DbiFlags/MDB_CREATE DbiFlags/MDB_DUPSORT])))]
+    (letfn [(open-db [name & flags]
+              (.openDbi env name (into-array DbiFlags flags)))]
       (map->Connection {:env          env
-                        :eavt-current (.openDbi env "eavt-current" (into-array DbiFlags [DbiFlags/MDB_CREATE DbiFlags/MDB_DUPSORT DbiFlags/MDB_INTEGERKEY]))
-                        :eavt-history (.openDbi env "eavt-history" (into-array DbiFlags [DbiFlags/MDB_CREATE DbiFlags/MDB_DUPSORT DbiFlags/MDB_INTEGERKEY]))
-                        :aevt-current (open-db "aevt-current")
-                        :aevt-history (open-db "aevt-history")
-                        :status       (.openDbi env "status" (into-array DbiFlags [DbiFlags/MDB_CREATE]))}))))
-
+                        :eavt-current (open-db "eavt-current" DbiFlags/MDB_CREATE DbiFlags/MDB_DUPSORT DbiFlags/MDB_INTEGERKEY)
+                        :eavt-history (open-db "eavt-history" DbiFlags/MDB_CREATE DbiFlags/MDB_DUPSORT DbiFlags/MDB_INTEGERKEY)
+                        :aevt-current (open-db "aevt-current" DbiFlags/MDB_CREATE DbiFlags/MDB_DUPSORT)
+                        :aevt-history (open-db "aevt-history" DbiFlags/MDB_CREATE DbiFlags/MDB_DUPSORT)
+                        :status       (open-db "status" DbiFlags/MDB_CREATE)}))))
 ;;
 
 (defn entity-by-id
@@ -138,33 +137,31 @@
     (map? data)
     (let [[eid entity] (if-let [eid (:db/id data)]
                          [eid (entity-by-id conn txn eid)]
-                         [(get-and-inc conn txn :last-eid) nil])]
-
-      (for [[attr value] data
-            :let [old-value (get entity attr)]
-            :when (and (not= attr :db/id)
-                       (not= value old-value))]
-        (if old-value
-          [[eid attr old-value tid false]
-           [eid attr value tid true]]
-
-          [[eid attr value tid true]])))
+                         [(get-and-inc conn txn :last-eid) nil])
+          xf (comp
+               (filter (fn [[attr value]]
+                         (and (not= attr :db/id)
+                              (not= value (get entity attr)))))
+               (mapcat (fn [[attr value]]
+                         (if-let [old-value (get entity attr)]
+                           [[eid attr old-value tid false]
+                            [eid attr value tid true]]
+                           [[eid attr value tid true]]))))]
+      (eduction xf data))
 
     (vector? data)
     (let [[action eid attr value] data]
       (case action
         :db.fn/retractEntity
-        (if-let [entity (entity-by-id conn eid)]
-          (for [[attr value] entity
-                :when (not= attr :db/id)]
-            [[eid attr value tid false]])
+        (if-let [entity (entity-by-id conn txn eid)]
+          (eduction (filter (fn [[attr value]] [eid attr value tid false])) entity)
           (throw (ex-info "entity not found" {:eid eid})))
 
         :db/add
-        [[action eid attr value true]]
+        [eid attr value true]
 
         :db/retract
-        [[action eid attr value false]]))))
+        [eid attr value false]))))
 
 (defn find-datom
   [^Connection conn ^Txn txn [eid attr value]]
@@ -194,7 +191,6 @@
       (let [tid (get-and-inc conn txn :last-tid)]
         (let [xf (comp
                    (mapcat (partial data->datoms conn txn tid))
-                   cat
                    (map (partial update-indexes conn txn)))]
           (into [] xf tx-data)
           (txn-commit txn))))))
