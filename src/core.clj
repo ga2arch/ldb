@@ -28,6 +28,9 @@
                               {:name    "Gabriele"
                                :surname "Cafarelli"}]})
 
+  (d/transact conn {:tx-data [{:name    "Gabriele"
+                               :surname "Carrettoni"}]})
+
   (def entities (d/entities-by-id conn (d/q conn {:find  '[?eid]
                                                   :where '[[?eid :name "Gabriele"]]})))
 
