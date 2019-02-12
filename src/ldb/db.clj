@@ -117,7 +117,7 @@
                         :ident        (open-db "ident" DbiFlags/MDB_CREATE)}))))
 ;;
 
-(defn entity-by-id
+(defn ^:dynamic entity-by-id
   ([^Connection conn eid]
    (with-open [txn (txn-read conn)]
      (entity-by-id conn txn eid)))
@@ -145,6 +145,8 @@
                               (not= value (get entity attr)))))
                (mapcat (fn [[attr value]]
                          (when (= :db/ident attr)
+                           (when-let [oident (get-key (.-ident conn) txn value)]
+                             (del-kv (.-ident conn) txn value oident))
                            (put-key (.-ident conn) txn value eid)
                            (put-key (.-ident conn) txn (str eid) value))
 
@@ -178,32 +180,31 @@
     (transduce xf identity nil (scan-key (.-eavt-current conn) txn eid))))
 
 (defn update-indexes
-  [^Connection conn ^Txn txn]
-  (let [entity-by-id (memoize entity-by-id)]
-    (fn [[eid attr _ _ op :as datom]]
-      (let [schema (entity-by-id conn txn attr)]
-        (if op
-          (do
-            (put-key (.-eavt-current conn) txn eid datom)
-            (put-key (.-aevt-current conn) txn attr datom))
+  [^Connection conn ^Txn txn [eid attr _ _ op :as datom]]
+  (let [schema (entity-by-id conn txn attr)]
+    (if op
+      (do
+        (put-key (.-eavt-current conn) txn eid datom)
+        (put-key (.-aevt-current conn) txn attr datom))
 
-          (let [[reid rattr :as to-retract] (find-datom conn txn datom)]
-            (put-key (.-eavt-history conn) txn eid datom)
-            (put-key (.-aevt-history conn) txn attr datom)
+      (let [[reid rattr :as to-retract] (find-datom conn txn datom)]
+        (put-key (.-eavt-history conn) txn eid datom)
+        (put-key (.-aevt-history conn) txn attr datom)
 
-            (del-kv (.-eavt-current conn) txn reid to-retract)
-            (del-kv (.-aevt-current conn) txn rattr to-retract)))))))
+        (del-kv (.-eavt-current conn) txn reid to-retract)
+        (del-kv (.-aevt-current conn) txn rattr to-retract)))))
 
 (defn transact
   [^Connection conn data]
   (let [tx-data (:tx-data data)]
     (with-open [txn (txn-write conn)]
       (let [tid (System/currentTimeMillis)]
-        (let [xf (comp
-                   (mapcat (partial data->datoms conn txn tid))
-                   (map (update-indexes conn txn)))]
-          (into [] xf tx-data)
-          (txn-commit txn))))))
+        (binding [entity-by-id (memoize entity-by-id)]
+          (let [xf (comp
+                     (mapcat (partial data->datoms conn txn tid))
+                     (map (partial update-indexes conn txn)))]
+            (into [] xf tx-data)
+            (txn-commit txn)))))))
 
 (defn show-db
   [{:keys [eavt-current eavt-history aevt-current aevt-history status ident] :as conn}]
