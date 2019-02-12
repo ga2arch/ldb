@@ -117,16 +117,14 @@
                         :ident        (open-db "ident" DbiFlags/MDB_CREATE)}))))
 ;;
 
-(defn entity-by-id*
+(defn entity-by-id
   ([^Connection conn eid]
    (with-open [txn (txn-read conn)]
-     (entity-by-id* conn txn eid)))
+     (entity-by-id conn txn eid)))
 
   ([^Connection conn ^Txn txn eid]
    (let [xf (map (fn [[_ attr value _ _]] [(get-key (.-ident conn) txn (str attr)) value]))]
      (into {:db/id eid} xf (into [] (scan-key (.-eavt-current conn) txn eid))))))
-
-(def entity-by-id (memoize entity-by-id*))
 
 (defn get-and-inc
   [^Connection conn ^Txn txn key]
@@ -180,19 +178,21 @@
     (transduce xf identity nil (scan-key (.-eavt-current conn) txn eid))))
 
 (defn update-indexes
-  [^Connection conn ^Txn txn [eid attr _ _ op :as datom]]
-  (let [schema (entity-by-id conn txn attr)]
-    (if op
-      (do
-        (put-key (.-eavt-current conn) txn eid datom)
-        (put-key (.-aevt-current conn) txn attr datom))
+  [^Connection conn ^Txn txn]
+  (let [entity-by-id (memoize entity-by-id)]
+    (fn [[eid attr _ _ op :as datom]]
+      (let [schema (entity-by-id conn txn attr)]
+        (if op
+          (do
+            (put-key (.-eavt-current conn) txn eid datom)
+            (put-key (.-aevt-current conn) txn attr datom))
 
-      (let [[reid rattr :as to-retract] (find-datom conn txn datom)]
-        (put-key (.-eavt-history conn) txn eid datom)
-        (put-key (.-aevt-history conn) txn attr datom)
+          (let [[reid rattr :as to-retract] (find-datom conn txn datom)]
+            (put-key (.-eavt-history conn) txn eid datom)
+            (put-key (.-aevt-history conn) txn attr datom)
 
-        (del-kv (.-eavt-current conn) txn reid to-retract)
-        (del-kv (.-aevt-current conn) txn rattr to-retract)))))
+            (del-kv (.-eavt-current conn) txn reid to-retract)
+            (del-kv (.-aevt-current conn) txn rattr to-retract)))))))
 
 (defn transact
   [^Connection conn data]
@@ -201,7 +201,7 @@
       (let [tid (System/currentTimeMillis)]
         (let [xf (comp
                    (mapcat (partial data->datoms conn txn tid))
-                   (map (partial update-indexes conn txn)))]
+                   (map (update-indexes conn txn)))]
           (into [] xf tx-data)
           (txn-commit txn))))))
 
