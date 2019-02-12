@@ -108,13 +108,14 @@
                      (.open (File. filepath) nil))]
     (letfn [(open-db [name & flags]
               (.openDbi env name (into-array DbiFlags flags)))]
-      (map->Connection {:env          env
-                        :eavt-current (open-db "eavt-current" DbiFlags/MDB_CREATE DbiFlags/MDB_DUPSORT DbiFlags/MDB_INTEGERKEY)
-                        :eavt-history (open-db "eavt-history" DbiFlags/MDB_CREATE DbiFlags/MDB_DUPSORT DbiFlags/MDB_INTEGERKEY)
-                        :aevt-current (open-db "aevt-current" DbiFlags/MDB_CREATE DbiFlags/MDB_DUPSORT DbiFlags/MDB_INTEGERKEY)
-                        :aevt-history (open-db "aevt-history" DbiFlags/MDB_CREATE DbiFlags/MDB_DUPSORT DbiFlags/MDB_INTEGERKEY)
-                        :status       (open-db "status" DbiFlags/MDB_CREATE)
-                        :ident        (open-db "ident" DbiFlags/MDB_CREATE)}))))
+      (let [conn (map->Connection {:env          env
+                                   :eavt-current (open-db "eavt-current" DbiFlags/MDB_CREATE DbiFlags/MDB_DUPSORT DbiFlags/MDB_INTEGERKEY)
+                                   :eavt-history (open-db "eavt-history" DbiFlags/MDB_CREATE DbiFlags/MDB_DUPSORT DbiFlags/MDB_INTEGERKEY)
+                                   :aevt-current (open-db "aevt-current" DbiFlags/MDB_CREATE DbiFlags/MDB_DUPSORT DbiFlags/MDB_INTEGERKEY)
+                                   :aevt-history (open-db "aevt-history" DbiFlags/MDB_CREATE DbiFlags/MDB_DUPSORT DbiFlags/MDB_INTEGERKEY)
+                                   :status       (open-db "status" DbiFlags/MDB_CREATE)
+                                   :ident        (open-db "ident" DbiFlags/MDB_CREATE)})]
+        conn))))
 ;;
 
 (defn ^:dynamic entity-by-id
@@ -145,8 +146,6 @@
                               (not= value (get entity attr)))))
                (mapcat (fn [[attr value]]
                          (when (= :db/ident attr)
-                           (when-let [oident (get-key (.-ident conn) txn value)]
-                             (del-kv (.-ident conn) txn value oident))
                            (put-key (.-ident conn) txn value eid)
                            (put-key (.-ident conn) txn (str eid) value))
 
@@ -155,7 +154,8 @@
                              [[eid ident old-value tid false]
                               [eid ident value tid true]]
                              [[eid ident value tid true]])
-                           (throw (ex-info "ident not found" {:ident attr}))))))]
+                           (throw (ex-info "ident not found" {:attr  attr
+                                                              :value value}))))))]
       (eduction xf data))
 
     (vector? data)
@@ -179,20 +179,38 @@
              (halt-when any?))]
     (transduce xf identity nil (scan-key (.-eavt-current conn) txn eid))))
 
+(defn valid-datom?
+  [{:db/keys [_ valueType _]} [_ _ value :as datom]]
+  (condp = valueType
+    :db.type/long
+    (int? value)
+
+    :db.type/string
+    (string? value)
+
+    :db.type/keyword
+    (keyword? value)
+
+    false))
+
 (defn update-indexes
-  [^Connection conn ^Txn txn [eid attr _ _ op :as datom]]
-  (let [schema (entity-by-id conn txn attr)]
-    (if op
-      (do
-        (put-key (.-eavt-current conn) txn eid datom)
-        (put-key (.-aevt-current conn) txn attr datom))
+  [^Connection conn ^Txn txn [eid attr value _ op :as datom]]
+  (when-not (#{:db/ident :db/valueType :db/cardinality} (get-key (.-ident conn) txn (str attr)))
+    (let [schema (entity-by-id conn txn attr)]
+      (when-not (valid-datom? schema datom)
+        (throw (ex-info "invalid datom" {:datom  datom
+                                         :schema schema})))))
+  (if op
+    (do
+      (put-key (.-eavt-current conn) txn eid datom)
+      (put-key (.-aevt-current conn) txn attr datom))
 
-      (let [[reid rattr :as to-retract] (find-datom conn txn datom)]
-        (put-key (.-eavt-history conn) txn eid datom)
-        (put-key (.-aevt-history conn) txn attr datom)
+    (let [[reid rattr :as to-retract] (find-datom conn txn datom)]
+      (put-key (.-eavt-history conn) txn eid datom)
+      (put-key (.-aevt-history conn) txn attr datom)
 
-        (del-kv (.-eavt-current conn) txn reid to-retract)
-        (del-kv (.-aevt-current conn) txn rattr to-retract)))))
+      (del-kv (.-eavt-current conn) txn reid to-retract)
+      (del-kv (.-aevt-current conn) txn rattr to-retract))))
 
 (defn transact
   [^Connection conn data]
@@ -218,7 +236,7 @@
 
 ;; query
 
-(defn is-binding-var
+(defn binding-var?
   [x]
   (when (instance? Named x)
     (.startsWith (name x) "?")))
@@ -228,33 +246,33 @@
   (let [filter-attr (filter (fn [[_ dattr _]] (= dattr attr)))
         filter-val (filter (fn [[_ _ dval]] (= dval val)))]
     (cond
-      (not (is-binding-var eid))
+      (not (binding-var? eid))
       (cond
-        (and (not (is-binding-var attr))
-             (not (is-binding-var val)))
+        (and (not (binding-var? attr))
+             (not (binding-var? val)))
         (eduction filter-attr
                   filter-val
                   (scan-key (.-eavt-current conn) txn eid))
 
-        (not (is-binding-var attr))
+        (not (binding-var? attr))
         (eduction filter-attr
                   (scan-key (.-eavt-current conn) txn eid))
 
-        (not (is-binding-var val))
+        (not (binding-var? val))
         (eduction filter-val
                   (scan-key (.-eavt-current conn) txn eid))
 
         :else
         (scan-key (.-eavt-current conn) txn eid))
 
-      (not (is-binding-var attr))
-      (if-not (is-binding-var val)
+      (not (binding-var? attr))
+      (if-not (binding-var? val)
         (eduction filter-attr
                   (scan-key (.-aevt-current conn) txn attr))
         (scan-key (.-aevt-current conn) txn attr))
 
       :else
-      (if-not (is-binding-var val)
+      (if-not (binding-var? val)
         (eduction
           (mapcat second)
           filter-val
@@ -273,7 +291,7 @@
       (let [binding-var (nth pattern i)
             binded-value (get frame binding-var binding-var)
             datom-value (nth datom i)]
-        (if (is-binding-var binding-var)
+        (if (binding-var? binding-var)
           (recur (inc i) (assoc frame binding-var datom-value))
           (when (= datom-value binded-value)
             (recur (inc i) frame)))))))

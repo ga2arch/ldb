@@ -15,9 +15,11 @@
                                           :where '[[?eid :name ?name]
                                                    [?eid :surname "Carrettoni"]]})))
 
-  (d/transact conn {:tx-data [{:db/ident :db/ident}
-                              {:db/ident :name}
-                              {:db/ident :surname}]})
+  (d/transact conn {:tx-data [{:db/ident     :name
+                               :db/valueType :db.type/string}
+
+                              {:db/ident     :surname
+                               :db/valueType :db.type/string}]})
 
   (d/transact conn {:tx-data [{:name    "Gabriele"
                                :surname "Carrettoni"}
