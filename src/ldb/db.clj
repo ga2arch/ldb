@@ -101,10 +101,10 @@
    (let [^CursorIterator it (.iterate db txn (KeyRange/all))]
      (let [vals (volatile! {})]
        (while (.hasNext it)
-         (let [kv (.next it)]
-           (let [k (decode-key (.key kv) int-key?)
-                 v (decode (.val kv))]
-             (vswap! vals (fn [vals] (update vals k (fn [a] ((fnil conj []) a v))))))))
+         (let [kv (.next it)
+               k (decode-key (.key kv) int-key?)
+               v (decode (.val kv))]
+           (vswap! vals (fn [vals] (update vals k (fn [a] ((fnil conj []) a v)))))))
        @vals))))
 
 (defn del-key
