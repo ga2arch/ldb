@@ -158,14 +158,13 @@
   ([^Connection conn eid]
    (with-open [txn (txn-read conn)]
      (entity-by-id conn txn eid)))
-
   ([^Connection conn ^Txn txn eid]
-   (let [xf (map (fn [[_ attr value _ _]] [(get-key (.-ident conn) txn (str attr)) value]))]
+   (let [xf (map (fn [[_ attr value _ _]] [(from-ident conn txn attr) value]))]
      (into {:db/id eid} xf (into [] (scan-key (.-eavt-current conn) txn eid))))))
 
 (defn get-and-inc
   [^Connection conn ^Txn txn key]
-  (let [eid (or (get-key (.-status conn) txn key) 0)]
+  (let [eid (or (get-key (.-status conn) txn key) -1)]
     (put-key (.-status conn) txn key (inc eid))
     (inc eid)))
 
@@ -218,7 +217,7 @@
     (transduce xf identity nil (scan-key (.-eavt-current conn) txn eid))))
 
 (defn valid-datom?
-  [{:db/keys [_ valueType _]} [_ _ value :as datom]]
+  [{:db/keys [_ valueType _]} [_ _ value]]
   (condp = valueType
     :db.type/long
     (int? value)
@@ -232,7 +231,7 @@
     false))
 
 (defn update-indexes
-  [^Connection conn ^Txn txn [eid attr value _ op :as datom]]
+  [^Connection conn ^Txn txn [eid attr _ _ op :as datom]]
   (when (>= attr 0)
     (let [schema (entity-by-id conn txn attr)]
       (when-not (valid-datom? schema datom)
@@ -255,7 +254,7 @@
   (let [tx-data (:tx-data data)]
     (with-open [txn (txn-write conn)]
       (let [tid (System/currentTimeMillis)]
-        (binding [entity-by-id entity-by-id]
+        (binding [entity-by-id (memoize entity-by-id)]
           (let [xf (comp
                      (mapcat (partial data->datoms conn txn tid))
                      (map (partial update-indexes conn txn)))]

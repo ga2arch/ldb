@@ -21,7 +21,7 @@
 
                               {:db/ident       :surname
                                :db/valueType   :db.type/string
-                               }]})
+                               :db/cardinality :db.cardinality/one}]})
 
   (d/transact conn {:tx-data [{:name    "Gabriele"
                                :surname "Carrettoni"}
