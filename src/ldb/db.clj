@@ -1,8 +1,9 @@
 (ns ldb.db
-  (:require [clojure.data.fressian :as fress])
+  (:require [clojure.data.fressian :as fress]
+            [clojure.spec.alpha :as s])
   (:import (org.lmdbjava Env DbiFlags PutFlags KeyRange CursorIterator Dbi Txn)
            (java.io File)
-           (java.nio ByteBuffer)
+           (java.nio ByteBuffer ByteOrder)
            (java.util UUID)
            (clojure.lang IReduceInit Named)))
 
@@ -11,6 +12,20 @@
                        ^Dbi avet-current ^Dbi avet-history
                        ^Dbi vaet-current ^Dbi vaet-history
                        ^Env env ^Dbi status ^Dbi ident])
+
+;; specs
+
+(s/def :db/ident keyword?)
+(s/def :db/valueType #{:db.type/string :db.type/keyword :db.type/long})
+(s/def :db/cardinality #{:db.cardinality/one :db.cardinality/many})
+(s/def ::schema (s/keys :req [:db/ident :db/valueType :db/cardinality]))
+
+;; const
+
+(def schema-idents [:db/ident :db/valueType :db/cardinality
+                    :db.type/keyword :db.type/string :db.type/long])
+
+;;
 
 (def bkey (ByteBuffer/allocateDirect 511))
 (def bval (ByteBuffer/allocateDirect 2000))
@@ -36,6 +51,12 @@
   [data]
   (fress/read data))
 
+(defn decode-key
+  [buffer int-key?]
+  (if int-key?
+    (.getInt buffer)
+    (decode buffer)))
+
 (defn txn-read
   [^Connection conn]
   (.txnRead ^Env (.-env conn)))
@@ -51,21 +72,6 @@
 (defn put-key
   [^Dbi db ^Txn txn key val]
   (.put db txn (encode-key key) (encode-val val) (into-array PutFlags [])))
-
-(defn scan-all
-  ([^Dbi db ^Txn txn]
-   (scan-all db txn false))
-  ([^Dbi db ^Txn txn int-key?]
-   (let [^CursorIterator it (.iterate db txn (KeyRange/all))]
-     (let [vals (volatile! {})]
-       (while (.hasNext it)
-         (let [kv (.next it)]
-           (vswap! vals (fn [vals] (update vals
-                                           (if int-key?
-                                             (.getInt (.key kv))
-                                             (decode (.key kv)))
-                                           (fn [a] ((fnil conj []) a (decode (.val kv)))))))))
-       (into {} @vals)))))
 
 (defn get-key
   [^Dbi db ^Txn txn key]
@@ -88,6 +94,19 @@
           (finally
             (.close it)))))))
 
+(defn scan-all
+  ([^Dbi db ^Txn txn]
+   (scan-all db txn false))
+  ([^Dbi db ^Txn txn int-key?]
+   (let [^CursorIterator it (.iterate db txn (KeyRange/all))]
+     (let [vals (volatile! {})]
+       (while (.hasNext it)
+         (let [kv (.next it)]
+           (let [k (decode-key (.key kv) int-key?)
+                 v (decode (.val kv))]
+             (vswap! vals (fn [vals] (update vals k (fn [a] ((fnil conj []) a v))))))))
+       @vals))))
+
 (defn del-key
   [^Dbi db ^Txn txn key]
   (.delete db txn (encode-key key)))
@@ -99,6 +118,19 @@
 (defn close
   [^Connection conn]
   (.close ^Env (.-env conn)))
+
+(defn insert-ident
+  [^Connection conn ^Txn txn key value]
+  (put-key (.-ident conn) txn key value)
+  (put-key (.-ident conn) txn (str value) key))
+
+(defn from-ident
+  [^Connection conn ^Txn txn key]
+  (get-key (.-ident conn) txn (str key)))
+
+(defn to-ident
+  [^Connection conn ^Txn txn key]
+  (get-key (.-ident conn) txn key))
 
 (defn connect
   [^String filepath]
@@ -115,6 +147,10 @@
                                    :aevt-history (open-db "aevt-history" DbiFlags/MDB_CREATE DbiFlags/MDB_DUPSORT DbiFlags/MDB_INTEGERKEY)
                                    :status       (open-db "status" DbiFlags/MDB_CREATE)
                                    :ident        (open-db "ident" DbiFlags/MDB_CREATE)})]
+        (with-open [txn (txn-write conn)]
+          (doseq [[i ident] (map-indexed vector schema-idents)]
+            (insert-ident conn txn ident (- (inc i))))
+          (txn-commit txn))
         conn))))
 ;;
 
@@ -137,26 +173,28 @@
   [^Connection conn ^Txn txn ^Integer tid data]
   (cond
     (map? data)
-    (let [[eid entity] (if-let [eid (:db/id data)]
-                         [eid (entity-by-id conn txn eid)]
-                         [(get-and-inc conn txn :last-eid) nil])
-          xf (comp
-               (filter (fn [[attr value]]
-                         (and (not= attr :db/id)
-                              (not= value (get entity attr)))))
-               (mapcat (fn [[attr value]]
-                         (when (= :db/ident attr)
-                           (put-key (.-ident conn) txn value eid)
-                           (put-key (.-ident conn) txn (str eid) value))
+    (do
+      (when (:db/ident data)
+        (s/explain ::schema data))
+      (let [[eid entity] (if-let [eid (:db/id data)]
+                           [eid (entity-by-id conn txn eid)]
+                           [(get-and-inc conn txn :last-eid) nil])
+            xf (comp
+                 (filter (fn [[attr value]]
+                           (and (not= attr :db/id)
+                                (not= value (get entity attr)))))
+                 (mapcat (fn [[attr value]]
+                           (when (= :db/ident attr)
+                             (insert-ident conn txn value eid))
 
-                         (if-let [ident (get-key (.-ident conn) txn attr)]
-                           (if-let [old-value (get entity attr)]
-                             [[eid ident old-value tid false]
-                              [eid ident value tid true]]
-                             [[eid ident value tid true]])
-                           (throw (ex-info "ident not found" {:attr  attr
-                                                              :value value}))))))]
-      (eduction xf data))
+                           (if-let [ident (to-ident conn txn attr)]
+                             (if-let [old-value (get entity attr)]
+                               [[eid ident old-value tid false]
+                                [eid ident value tid true]]
+                               [[eid ident value tid true]])
+                             (throw (ex-info "ident not found" {:attr  attr
+                                                                :value value}))))))]
+        (eduction xf data)))
 
     (vector? data)
     (let [[action eid attr value] data]
@@ -195,7 +233,7 @@
 
 (defn update-indexes
   [^Connection conn ^Txn txn [eid attr value _ op :as datom]]
-  (when-not (#{:db/ident :db/valueType :db/cardinality} (get-key (.-ident conn) txn (str attr)))
+  (when (>= attr 0)
     (let [schema (entity-by-id conn txn attr)]
       (when-not (valid-datom? schema datom)
         (throw (ex-info "invalid datom" {:datom  datom
@@ -217,7 +255,7 @@
   (let [tx-data (:tx-data data)]
     (with-open [txn (txn-write conn)]
       (let [tid (System/currentTimeMillis)]
-        (binding [entity-by-id (memoize entity-by-id)]
+        (binding [entity-by-id entity-by-id]
           (let [xf (comp
                      (mapcat (partial data->datoms conn txn tid))
                      (map (partial update-indexes conn txn)))]
@@ -227,10 +265,10 @@
 (defn show-db
   [{:keys [eavt-current eavt-history aevt-current aevt-history status ident] :as conn}]
   (with-open [txn (txn-read conn)]
-    {:eavt   {:current (scan-all eavt-current txn true)
-              :history (scan-all eavt-history txn true)}
-     :aevt   {:current (scan-all aevt-current txn true)
-              :history (scan-all aevt-history txn true)}
+    {:eavt   {:current (into (sorted-map) (scan-all eavt-current txn true))
+              :history (into (sorted-map) (scan-all eavt-history txn true))}
+     :aevt   {:current (into (sorted-map) (scan-all aevt-current txn true))
+              :history (into (sorted-map) (scan-all aevt-history txn true))}
      :status (scan-all status txn)
      :ident  (scan-all ident txn)}))
 
@@ -304,9 +342,8 @@
 
 (defn update-pattern
   [conn txn frame [eid attr value]]
-  (letfn [(unify [var] (get frame var var))
-          (to-ident [var] (get-key (.-ident conn) txn var))]
-    [(unify eid) (to-ident (unify attr)) (unify value)]))
+  (letfn [(unify [var] (get frame var var))]
+    [(unify eid) (to-ident conn txn (unify attr)) (unify value)]))
 
 (defn entities-by-id [conn eids]
   (map (fn [[eid]] (entity-by-id conn eid)) eids))

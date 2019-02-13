@@ -7,7 +7,8 @@
                  [org.lmdbjava/lmdbjava "0.6.3"]
                  [org.clojure/data.fressian "0.2.1"]
                  [criterium "0.4.4"]
-                 [org.clojure/tools.namespace "0.3.0-alpha4"]]
+                 [org.clojure/tools.namespace "0.3.0-alpha4"]
+                 [org.clojure/spec.alpha "0.2.176"]]
   :main ^:skip-aot core
   :target-path "target/%s"
   :profiles {:uberjar {:aot :all}})

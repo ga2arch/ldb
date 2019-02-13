@@ -15,11 +15,13 @@
                                           :where '[[?eid :name ?name]
                                                    [?eid :surname "Carrettoni"]]})))
 
-  (d/transact conn {:tx-data [{:db/ident     :name
-                               :db/valueType :db.type/string}
+  (d/transact conn {:tx-data [{:db/ident       :name
+                               :db/valueType   :db.type/string
+                               :db/cardinality :db.cardinality/one}
 
-                              {:db/ident     :surname
-                               :db/valueType :db.type/string}]})
+                              {:db/ident       :surname
+                               :db/valueType   :db.type/string
+                               }]})
 
   (d/transact conn {:tx-data [{:name    "Gabriele"
                                :surname "Carrettoni"}
@@ -30,11 +32,13 @@
                               {:name    "Gabriele"
                                :surname "Cafarelli"}]})
 
-  (d/transact conn {:tx-data [{:name    "Gabriele"
-                               :surname "Carrettoni"}]})
+  (do (d/transact conn {:tx-data [{:name    "Gabriele"
+                                   :surname "Carrettoni"}]})
+      (d/show-db conn))
 
-  (def entities (d/entities-by-id conn (d/q conn {:find  '[?eid]
-                                                  :where '[[?eid :name "Gabriele"]]})))
+  (d/entities-by-id conn (d/q conn {:find  '[?eid]
+                                    :where '[[?eid :name "Gabriele"]
+                                             [?eid :surname "Cafarelli"]]}))
 
 
   (d/transact conn {:tx-data [{:db/id   (:db/id (first entities)),
