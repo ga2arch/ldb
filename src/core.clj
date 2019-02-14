@@ -17,7 +17,7 @@
 
   (d/transact conn {:tx-data [{:db/ident       :name
                                :db/valueType   :db.type/string
-                               :db/cardinality :db.cardinality/one}
+                               :db/cardinality :db.cardinality/many}
 
                               {:db/ident       :surname
                                :db/valueType   :db.type/string
@@ -32,7 +32,7 @@
                               {:name    "Gabriele"
                                :surname "Cafarelli"}]})
 
-  (do (d/transact conn {:tx-data [{:name    "Gabriele"
+  (do (d/transact conn {:tx-data [{:name    ["Gabriele"]
                                    :surname "Carrettoni"}]})
       (d/show-db conn))
 

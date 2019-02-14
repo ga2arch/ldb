@@ -4,7 +4,7 @@
   (:import (org.lmdbjava Env DbiFlags PutFlags KeyRange CursorIterator Dbi Txn)
            (java.io File)
            (java.nio ByteBuffer ByteOrder)
-           (java.util UUID)
+           (java.util UUID HashSet)
            (clojure.lang IReduceInit Named)))
 
 (defrecord Connection [^Dbi eavt-current ^Dbi eavt-history
@@ -23,7 +23,8 @@
 ;; const
 
 (def schema-idents [:db/ident :db/valueType :db/cardinality
-                    :db.type/keyword :db.type/string :db.type/long])
+                    :db.type/keyword :db.type/string :db.type/long
+                    :db.cardinality/one :db.cardinality/many])
 
 ;;
 
@@ -183,16 +184,25 @@
                            (and (not= attr :db/id)
                                 (not= value (get entity attr)))))
                  (mapcat (fn [[attr value]]
-                           (when (= :db/ident attr)
-                             (insert-ident conn txn value eid))
+                           (let [value (if (vector? value)
+                                         (set value)
+                                         value)]
+                             (when (= :db/ident attr)
+                               (insert-ident conn txn value eid))
 
-                           (if-let [ident (to-ident conn txn attr)]
-                             (if-let [old-value (get entity attr)]
-                               [[eid ident old-value tid false]
-                                [eid ident value tid true]]
-                               [[eid ident value tid true]])
-                             (throw (ex-info "ident not found" {:attr  attr
-                                                                :value value}))))))]
+                             (if-let [ident (to-ident conn txn attr)]
+                               (if-let [old-value (get entity attr)]
+                                 (if (and (instance? HashSet old-value)
+                                          (set? value))
+                                   [[eid ident old-value tid false]
+                                    [eid ident (into value old-value) tid true]]
+
+                                   [[eid ident old-value tid false]
+                                    [eid ident value tid true]])
+
+                                 [[eid ident value tid true]])
+                               (throw (ex-info "ident not found" {:attr  attr
+                                                                  :value value})))))))]
         (eduction xf data)))
 
     (vector? data)
@@ -216,9 +226,9 @@
              (halt-when any?))]
     (transduce xf identity nil (scan-key (.-eavt-current conn) txn eid))))
 
-(defn valid-datom?
-  [{:db/keys [_ valueType _]} [_ _ value]]
-  (condp = valueType
+(defn valid-type?
+  [valueType value]
+  (case valueType
     :db.type/long
     (int? value)
 
@@ -230,9 +240,21 @@
 
     false))
 
+(defn valid-datom?
+  [{:db/keys [_ valueType cardinality]} [_ _ value :as datom]]
+  (case cardinality
+    :db.cardinality/one
+    (valid-type? valueType value)
+
+    :db.cardinality/many
+    (if (= valueType :db.type/ref)
+      (set? value)
+      (and (set? value)
+           (every? (partial valid-type? valueType) value)))))
+
 (defn update-indexes
   [^Connection conn ^Txn txn [eid attr _ _ op :as datom]]
-  (when (>= attr 0)
+  (when (and (>= attr 0) op)
     (let [schema (entity-by-id conn txn attr)]
       (when-not (valid-datom? schema datom)
         (throw (ex-info "invalid datom" {:datom  datom
