@@ -16,14 +16,14 @@
 ;; specs
 
 (s/def :db/ident keyword?)
-(s/def :db/valueType #{:db.type/string :db.type/keyword :db.type/long})
+(s/def :db/valueType #{:db.type/string :db.type/keyword :db.type/long :db.type/ref})
 (s/def :db/cardinality #{:db.cardinality/one :db.cardinality/many})
 (s/def ::schema (s/keys :req [:db/ident :db/valueType :db/cardinality]))
 
 ;; const
 
 (def schema-idents [:db/ident :db/valueType :db/cardinality
-                    :db.type/keyword :db.type/string :db.type/long
+                    :db.type/keyword :db.type/string :db.type/long :db.type/ref
                     :db.cardinality/one :db.cardinality/many])
 
 ;;
@@ -184,25 +184,55 @@
                            (and (not= attr :db/id)
                                 (not= value (get entity attr)))))
                  (mapcat (fn [[attr value]]
-                           (let [value (if (vector? value)
-                                         (set value)
-                                         value)]
-                             (when (= :db/ident attr)
-                               (insert-ident conn txn value eid))
+                           (when (= :db/ident attr)
+                             (insert-ident conn txn value eid))
 
-                             (if-let [ident (to-ident conn txn attr)]
-                               (if-let [old-value (get entity attr)]
-                                 (if (and (instance? HashSet old-value)
-                                          (set? value))
-                                   [[eid ident old-value tid false]
-                                    [eid ident (into value old-value) tid true]]
+                           (if-let [ident (to-ident conn txn attr)]
+                             (if (neg? ident)
+                               [[eid ident value tid true]]
 
-                                   [[eid ident old-value tid false]
-                                    [eid ident value tid true]])
+                               (let [value (if (vector? value) (set value) value)
+                                     old-value (get entity attr)
+                                     {:db/keys [valueType cardinality]} (entity-by-id conn txn ident)]
 
-                                 [[eid ident value tid true]])
-                               (throw (ex-info "ident not found" {:attr  attr
-                                                                  :value value})))))))]
+                                 (case cardinality
+                                   :db.cardinality/one
+                                   (case valueType
+                                     :db.type/ref
+                                     (do
+                                       (assert (map? value))
+                                       (let [ref-datom (data->datoms conn txn tid value)
+                                             id (ffirst ref-datom)
+                                             datoms (if old-value
+                                                      [[eid ident old-value tid false]
+                                                       [eid ident id tid true]]
+                                                      [[eid ident id tid true]])]
+                                         (concat datoms ref-datom)))
+
+                                     (if old-value
+                                       [[eid ident old-value tid false]
+                                        [eid ident value tid true]]
+                                       [[eid ident value tid true]]))
+
+                                   :db.cardinality/many
+                                   (case valueType
+                                     :db.type/ref
+                                     (do
+                                       (assert (and (set? value) (every? map? value)))
+                                       (let [ref-datoms (mapcat (partial data->datoms conn txn tid) value)
+                                             ids (into #{} (map first) ref-datoms)
+                                             datoms (if old-value
+                                                      [[eid ident old-value tid false]
+                                                       [eid ident (into ids old-value) tid true]]
+                                                      [[eid ident ids tid true]])]
+                                         (concat ref-datoms datoms)))
+
+                                     (if old-value
+                                       [[eid ident old-value tid false]
+                                        [eid ident (into value old-value) tid true]]
+                                       [[eid ident value tid true]])))))
+                             (throw (ex-info "ident not found" {:attr  attr
+                                                                :value value}))))))]
         (eduction xf data)))
 
     (vector? data)
@@ -238,10 +268,13 @@
     :db.type/keyword
     (keyword? value)
 
+    :db.type/ref
+    (int? value)
+
     false))
 
 (defn valid-datom?
-  [{:db/keys [_ valueType cardinality]} [_ _ value :as datom]]
+  [{:db/keys [_ valueType cardinality]} [_ _ value]]
   (case cardinality
     :db.cardinality/one
     (valid-type? valueType value)

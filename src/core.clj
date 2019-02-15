@@ -21,16 +21,17 @@
 
                               {:db/ident       :surname
                                :db/valueType   :db.type/string
-                               :db/cardinality :db.cardinality/one}]})
+                               :db/cardinality :db.cardinality/one}
 
-  (d/transact conn {:tx-data [{:name    "Gabriele"
-                               :surname "Carrettoni"}
+                              {:db/ident       :address
+                               :db/valueType   :db.type/ref
+                               :db/cardinality :db.cardinality/many}]})
 
-                              {:name    "Gabriele"
-                               :surname "Cafarelli"}
+  (d/transact conn {:tx-data [{:name    ["Gabriele"]
+                               :surname "Carrettoni"
+                               :address "kek"}]})
 
-                              {:name    "Gabriele"
-                               :surname "Cafarelli"}]})
+
 
   (do (d/transact conn {:tx-data [{:name    ["Gabriele"]
                                    :surname "Carrettoni"}]})
