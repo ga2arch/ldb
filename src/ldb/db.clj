@@ -16,6 +16,8 @@
 ;; specs
 
 (s/def :db/ident keyword?)
+(s/def :db/id (s/or :id int?
+                    :tempid string?))
 (s/def :db/valueType #{:db.type/string :db.type/keyword :db.type/long :db.type/ref})
 (s/def :db/cardinality #{:db.cardinality/one :db.cardinality/many})
 (s/def ::schema (s/keys :req [:db/ident :db/valueType :db/cardinality]))
@@ -161,8 +163,10 @@
    (with-open [txn (txn-read conn)]
      (entity-by-id conn txn eid)))
   ([^Connection conn ^Txn txn eid]
-   (let [xf (map (fn [[_ attr value _ _]] [(from-ident conn txn attr) value]))]
-     (into {:db/id eid} xf (into [] (scan-key (.-eavt-current conn) txn eid))))))
+   (let [xf (map (fn [[_ attr value _ _]] [(from-ident conn txn attr) value]))
+         entity (into {} xf (into [] (scan-key (.-eavt-current conn) txn eid)))]
+     (when-not (empty? entity)
+       (assoc entity :db/id eid)))))
 
 (defn get-and-inc
   [^Connection conn ^Txn txn key]
@@ -203,15 +207,29 @@
     (throw (ex-info "invalid value" {:value  value
                                      :schema schema}))))
 
+(defn ^:dynamic tempid->eid [_] (throw (ex-info "undefined" {})))
+
 (defn map->datoms
   [^Connection conn ^Txn txn ^Integer tid data]
   (when (:db/ident data)
     (s/explain ::schema data))
 
   (let [[eid entity] (if-let [eid (:db/id data)]
-                       [eid (entity-by-id conn txn eid)]
+                       (cond
+                         (int? eid)
+                         [eid (entity-by-id conn txn eid)]
+
+                         (string? eid)
+                         [(tempid->eid eid) nil])
                        [(get-and-inc conn txn :last-eid) nil])]
-    (letfn [(filter-attr [[attr value]]
+    (letfn [(hydrate [data]
+              (if-let [eid (:db/id data)]
+                (if (string? eid)
+                  (assoc data :db/id (tempid->eid eid))
+                  data)
+                (assoc data :db/id (get-and-inc conn txn :last-eid))))
+
+            (filter-attr [[attr value]]
               (and (not= attr :db/id)
                    (not= value (get entity attr))))
 
@@ -240,8 +258,9 @@
                     :db.cardinality/one
                     (case valueType
                       :db.type/ref
-                      (let [ref-datom (map->datoms conn txn tid value)
-                            id (ffirst ref-datom)
+                      (let [value (hydrate value)
+                            ref-datom (map->datoms conn txn tid value)
+                            id (:db/id value)
                             datoms (if old-value
                                      [[eid ident old-value tid false]
                                       [eid ident id tid true]]
@@ -256,8 +275,9 @@
                     :db.cardinality/many
                     (case valueType
                       :db.type/ref
-                      (let [ref-datoms (mapcat (partial map->datoms conn txn tid) value)
-                            ids (into #{} (map first) ref-datoms)
+                      (let [value (sequence (map hydrate) value)
+                            ref-datoms (into [] (mapcat (partial map->datoms conn txn tid)) value)
+                            ids (into #{} (map :db/id) value)
                             datoms (if old-value
                                      [[eid ident old-value tid false]
                                       [eid ident (into ids old-value) tid true]]
@@ -319,13 +339,21 @@
   [^Connection conn data]
   (let [tx-data (:tx-data data)]
     (with-open [txn (txn-write conn)]
-      (let [tid (System/currentTimeMillis)]
-        (binding [entity-by-id (memoize entity-by-id)]
+      (let [tid (System/currentTimeMillis)
+            tempids (volatile! {})]
+        (binding [entity-by-id (memoize entity-by-id)
+                  tempid->eid (fn [tempid]
+                                (if-let [id (get @tempids tempid)]
+                                  id
+                                  (let [eid (get-and-inc conn txn :last-eid)]
+                                    (vswap! tempids assoc tempid eid)
+                                    eid)))]
           (let [xf (comp
                      (mapcat (partial data->datoms conn txn tid))
-                     (map (partial update-indexes conn txn)))]
-            (into [] xf tx-data)))
-        (txn-commit txn)))))
+                     (map (partial update-indexes conn txn)))
+                datoms (into [] xf tx-data)]
+            (txn-commit txn)
+            datoms))))))
 
 (defn show-db
   [{:keys [eavt-current eavt-history aevt-current aevt-history status ident] :as conn}]
