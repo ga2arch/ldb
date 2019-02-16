@@ -1,10 +1,10 @@
 (ns ldb.db
   (:require [clojure.data.fressian :as fress]
-            [clojure.spec.alpha :as s])
+            [clojure.spec.alpha :as s]
+            [ldb.thread :refer [thread-local]])
   (:import (org.lmdbjava Env DbiFlags PutFlags KeyRange CursorIterator Dbi Txn)
            (java.io File)
-           (java.nio ByteBuffer ByteOrder)
-           (java.util UUID HashSet)
+           (java.nio ByteBuffer)
            (clojure.lang IReduceInit Named)))
 
 (defrecord Connection [^Dbi eavt-current ^Dbi eavt-history
@@ -28,22 +28,23 @@
 
 ;;
 
-(def bkey (ByteBuffer/allocateDirect 511))
-(def bval (ByteBuffer/allocateDirect 2000))
+(def bkey (thread-local (ByteBuffer/allocateDirect 511)))
+(def bval (thread-local (ByteBuffer/allocateDirect 2000)))
 
 (defn encode-key
   [data]
-  (.clear bkey)
-  (cond
-    (int? data)
-    (.putInt bkey data)
-    :else
-    (.put bkey (fress/write data)))
-  (.flip bkey))
+  (let [bkey @bkey]
+    (.clear bkey)
+    (cond
+      (int? data)
+      (.putInt bkey data)
+      :else
+      (.put bkey (fress/write data)))
+    (.flip bkey)))
 
 (defn encode-val
   [data]
-  (doto bval
+  (doto @bval
     (.clear)
     (.put (fress/write data))
     (.flip)))
@@ -193,7 +194,7 @@
     (valid-type? valueType value)
 
     :db.cardinality/many
-    (and (seqable? value)
+    (and (coll? value)
          (every? (partial valid-type? valueType) value))))
 
 (defn validate-value
@@ -231,7 +232,7 @@
             (to->datoms [[ident attr value]]
               (if (neg? ident)
                 [[eid ident value tid true]]
-                (let [value (if (seqable? value) (set value) value)
+                (let [value (if (coll? value) (set value) value)
                       old-value (get entity attr)
                       {:db/keys [valueType cardinality]} (entity-by-id conn txn ident)]
 
@@ -271,7 +272,7 @@
       (eduction (filter filter-attr)
                 (map update-ident)
                 (map validate)
-                (map to->datoms) data))))
+                (mapcat to->datoms) data))))
 
 (defn data->datoms
   [^Connection conn ^Txn txn ^Integer tid data]
@@ -300,7 +301,6 @@
              (halt-when any?))]
     (transduce xf identity nil (scan-key (.-eavt-current conn) txn eid))))
 
-
 (defn update-indexes
   [^Connection conn ^Txn txn [eid attr _ _ op :as datom]]
   (if op
@@ -324,8 +324,8 @@
           (let [xf (comp
                      (mapcat (partial data->datoms conn txn tid))
                      (map (partial update-indexes conn txn)))]
-            (into [] xf tx-data)
-            (txn-commit txn)))))))
+            (into [] xf tx-data)))
+        (txn-commit txn)))))
 
 (defn show-db
   [{:keys [eavt-current eavt-history aevt-current aevt-history status ident] :as conn}]

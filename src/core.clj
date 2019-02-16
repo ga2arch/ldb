@@ -17,7 +17,7 @@
 
   (d/transact conn {:tx-data [{:db/ident       :name
                                :db/valueType   :db.type/string
-                               :db/cardinality :db.cardinality/many}
+                               :db/cardinality :db.cardinality/one}
 
                               {:db/ident       :surname
                                :db/valueType   :db.type/string
@@ -27,9 +27,8 @@
                                :db/valueType   :db.type/ref
                                :db/cardinality :db.cardinality/many}]})
 
-  (d/transact conn {:tx-data [{:name    ["Gabriele"]
-                               :surname "Carrettoni"
-                               :address "kek"}]})
+  (d/transact conn {:tx-data [{:name    "Gabriele"
+                               :surname "Carrettoni"}]})
 
 
 
@@ -39,7 +38,7 @@
 
   (d/entities-by-id conn (d/q conn {:find  '[?eid]
                                     :where '[[?eid :name "Gabriele"]
-                                             [?eid :surname "Cafarelli"]]}))
+                                             [?eid :surname "Carrettoni"]]}))
 
 
   (d/transact conn {:tx-data [{:db/id   (:db/id (first entities)),
