@@ -240,7 +240,7 @@
                       (if-let [id (get tempids tempid)]
                         id
                         (let [eid (get-and-inc conn txn :last-eid)]
-                          (assoc! tempids tempid eid)
+                          (vswap! tempids assoc! tempid eid)
                           eid)))
         [eid entity] (if-let [eid (:db/id data)]
                        (cond
@@ -328,10 +328,10 @@
   (letfn [(step [state input]
             (cond
               (map? input)
-              (let [t-tempids (:tempids state)
+              (let [t-tempids (volatile! (:tempids state))
                     datoms (eduction (mapcat (partial update-indexes conn txn))
                                      (map->datoms conn txn tid t-tempids input))]
-                {:tempids t-tempids
+                {:tempids @t-tempids
                  :datoms  (into (:datoms state) datoms)})
 
               (vector? input)
