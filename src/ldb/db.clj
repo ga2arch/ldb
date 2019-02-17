@@ -4,7 +4,7 @@
             [ldb.thread :refer [thread-local]])
   (:import (org.lmdbjava Env DbiFlags PutFlags KeyRange CursorIterator Dbi Txn)
            (java.io File)
-           (java.nio ByteBuffer)
+           (java.nio ByteBuffer ByteOrder)
            (clojure.lang IReduceInit Named)))
 
 (defrecord Connection [^Dbi eavt-current ^Dbi eavt-history
@@ -30,26 +30,29 @@
 
 ;;
 
-(def bkey (thread-local (ByteBuffer/allocateDirect 511)))
-(def bval (thread-local (ByteBuffer/allocateDirect 2000)))
-
 (defn encode-key
   [data]
-  (let [bkey @bkey]
-    (.clear bkey)
-    (cond
-      (int? data)
+  (cond
+    (int? data)
+    (let [bkey (ByteBuffer/allocateDirect 8)]
+      (.order bkey (ByteOrder/BIG_ENDIAN))
       (.putInt bkey data)
-      :else
-      (.put bkey (fress/write data)))
-    (.flip bkey)))
+      (.flip bkey))
+
+    :else
+    (let [data (fress/write data)
+          bkey (ByteBuffer/allocateDirect (.limit data))]
+      (.order bkey (ByteOrder/BIG_ENDIAN))
+      (.put bkey data)
+      (.flip bkey))))
 
 (defn encode-val
   [data]
-  (doto @bval
-    (.clear)
-    (.put (fress/write data))
-    (.flip)))
+  (let [data (fress/write data)
+        bkey (ByteBuffer/allocateDirect (.limit data))]
+    (.order bkey (ByteOrder/BIG_ENDIAN))
+    (.put bkey data)
+    (.flip bkey)))
 
 (defn decode
   [data]
@@ -58,7 +61,9 @@
 (defn decode-key
   [buffer int-key?]
   (if int-key?
-    (.getInt buffer)
+    (let [n (.getInt buffer)]
+      (.flip buffer)
+      n)
     (decode buffer)))
 
 (defn txn-read
@@ -145,10 +150,10 @@
     (letfn [(open-db [name & flags]
               (.openDbi env name (into-array DbiFlags flags)))]
       (let [conn (map->Connection {:env          env
-                                   :eavt-current (open-db "eavt-current" DbiFlags/MDB_CREATE DbiFlags/MDB_DUPSORT DbiFlags/MDB_INTEGERKEY)
-                                   :eavt-history (open-db "eavt-history" DbiFlags/MDB_CREATE DbiFlags/MDB_DUPSORT DbiFlags/MDB_INTEGERKEY)
-                                   :aevt-current (open-db "aevt-current" DbiFlags/MDB_CREATE DbiFlags/MDB_DUPSORT DbiFlags/MDB_INTEGERKEY)
-                                   :aevt-history (open-db "aevt-history" DbiFlags/MDB_CREATE DbiFlags/MDB_DUPSORT DbiFlags/MDB_INTEGERKEY)
+                                   :eavt-current (open-db "eavt-current" DbiFlags/MDB_CREATE DbiFlags/MDB_DUPSORT)
+                                   :eavt-history (open-db "eavt-history" DbiFlags/MDB_CREATE DbiFlags/MDB_DUPSORT)
+                                   :aevt-current (open-db "aevt-current" DbiFlags/MDB_CREATE DbiFlags/MDB_DUPSORT)
+                                   :aevt-history (open-db "aevt-history" DbiFlags/MDB_CREATE DbiFlags/MDB_DUPSORT)
                                    :status       (open-db "status" DbiFlags/MDB_CREATE)
                                    :ident        (open-db "ident" DbiFlags/MDB_CREATE)})]
         (with-open [txn (txn-write conn)]
@@ -160,13 +165,15 @@
 
 (defn ^:dynamic entity-by-id
   ([^Connection conn eid]
-   (with-open [txn (txn-read conn)]
-     (entity-by-id conn txn eid)))
+   (when eid
+     (with-open [txn (txn-read conn)]
+       (entity-by-id conn txn eid))))
   ([^Connection conn ^Txn txn eid]
-   (let [xf (map (fn [[_ attr value _ _]] [(from-ident conn txn attr) value]))
-         entity (into {} xf (into [] (scan-key (.-eavt-current conn) txn eid)))]
-     (when-not (empty? entity)
-       (assoc entity :db/id eid)))))
+   (when eid
+     (let [xf (map (fn [[_ attr value _ _]] [(from-ident conn txn attr) value]))
+           entity (into {} xf (scan-key (.-eavt-current conn) txn eid))]
+       (when-not (empty? entity)
+         (assoc entity :db/id eid))))))
 
 (defn get-and-inc
   [^Connection conn ^Txn txn key]
@@ -259,12 +266,12 @@
                     data))
 
         data (hydrate data)
-        entity (entity-by-id conn txn (:db/id data))
+        old-entity (entity-by-id conn txn (:db/id data))
         eid (:db/id data)]
 
     (letfn [(filter-attr [[attr value]]
               (and (not= attr :db/id)
-                   (not= value (get entity attr))))
+                   (not= value (get old-entity attr))))
 
             (update-ident [[attr value]]
               (when (= :db/ident attr)
@@ -275,7 +282,6 @@
                                                    :value value}))))
 
             (validate [[ident _ value :as all]]
-              (println ident)
               (when-not (neg? ident)
                 (let [schema (entity-by-id conn txn ident)]
                   (validate-value value schema)))
@@ -285,7 +291,7 @@
               (if (neg? ident)
                 [[eid ident value tid true]]
                 (let [value (if (coll? value) (set value) value)
-                      old-value (get entity attr)
+                      old-value (get old-entity attr)
                       {:db/keys [valueType cardinality]} (entity-by-id conn txn ident)]
 
                   (case cardinality

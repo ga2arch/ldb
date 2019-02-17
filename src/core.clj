@@ -7,9 +7,9 @@
 (comment
   (def records (mapv (fn [i]
                        {:name    (str "Gabriele" i)
-                        :surname (str "Carretoni" i)}) (range 100000)))
+                        :surname (str "Carrettoni" i)}) (range 100000)))
 
-  (time (d/transact conn {:tx-data records}))
+  (time (def result (d/transact conn {:tx-data records})))
 
   (time (d/entities-by-id conn (d/q conn {:find  '[?eid]
                                           :where '[[?eid :name ?name]
