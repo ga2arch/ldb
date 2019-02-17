@@ -230,7 +230,6 @@
       (del-kv (.-aevt-current conn) txn rattr to-retract)
       [datom to-retract])))
 
-
 (defn map->datoms
   [^Connection conn ^Txn txn ^Integer tid tempids data]
   (when (:db/ident data)
@@ -242,23 +241,28 @@
                         (let [eid (get-and-inc conn txn :last-eid)]
                           (vswap! tempids assoc! tempid eid)
                           eid)))
-        [eid entity] (if-let [eid (:db/id data)]
-                       (cond
-                         (int? eid)
-                         [eid (entity-by-id conn txn eid)]
+        hydrate (fn [data]
+                  (if-not (:hydrated (meta data))
+                    (let [id (:db/id data)
+                          data (with-meta data {:hydrated true})]
+                      (cond
+                        (int? id)
+                        (if (entity-by-id conn txn id)
+                          data
+                          (throw (ex-info "entity not found" {:eid id})))
 
-                         (string? eid)
-                         [(tempid->eid eid) nil])
-                       [(get-and-inc conn txn :last-eid) nil])]
+                        (string? id)
+                        (assoc data :db/id (tempid->eid id))
 
-    (letfn [(hydrate [data]
-              (if-let [eid (:db/id data)]
-                (if (string? eid)
-                  (assoc data :db/id (tempid->eid eid))
-                  data)
-                (assoc data :db/id (get-and-inc conn txn :last-eid))))
+                        :default
+                        (assoc data :db/id (get-and-inc conn txn :last-eid))))
+                    data))
 
-            (filter-attr [[attr value]]
+        data (hydrate data)
+        entity (entity-by-id conn txn (:db/id data))
+        eid (:db/id data)]
+
+    (letfn [(filter-attr [[attr value]]
               (and (not= attr :db/id)
                    (not= value (get entity attr))))
 
@@ -271,6 +275,7 @@
                                                    :value value}))))
 
             (validate [[ident _ value :as all]]
+              (println ident)
               (when-not (neg? ident)
                 (let [schema (entity-by-id conn txn ident)]
                   (validate-value value schema)))
@@ -329,28 +334,15 @@
             (cond
               (map? input)
               (let [t-tempids (volatile! (:tempids state))
-                    datoms (eduction (mapcat (partial update-indexes conn txn))
-                                     (map->datoms conn txn tid t-tempids input))]
+                    datoms (into (:datoms state)
+                                 (mapcat (partial update-indexes conn txn))
+                                 (map->datoms conn txn tid t-tempids input))]
                 {:tempids @t-tempids
-                 :datoms  (into (:datoms state) datoms)})
-
-              (vector? input)
-              (let [[action eid attr value] input]
-                (case action
-                  :db.fn/retractEntity
-                  (if-let [entity (entity-by-id conn txn eid)]
-                    (eduction (filter (fn [[attr value]] [eid attr value tid false])) entity)
-                    (throw (ex-info "entity not found" {:eid eid})))
-
-                  :db/add
-                  [eid attr value true]
-
-                  :db/retract
-                  [eid attr value false]))))]
+                 :datoms  datoms})))]
     (let [{:keys [tempids datoms]} (reduce step {:tempids (transient {})
                                                  :datoms  []} tx-data)]
       {:tempids (persistent! tempids)
-       :datoms datoms})))
+       :datoms  datoms})))
 
 (defn transact
   [^Connection conn data]
