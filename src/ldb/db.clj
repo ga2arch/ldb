@@ -225,29 +225,29 @@
   [m]
   (when (:db/ident m)
     (s/explain ::schema m))
-  (eduction (map (fn [[k v]] [nil k v true])) m))
+  (let [eid (:db/id m)]
+    (eduction (map (fn [[attr value]] [eid attr value true])) m)))
 
 (defn action->datoms
   [^Connection conn ^Txn txn ^Integer tid tempids]
   (letfn [(tempid->eid [tempid]
-            (if-let [id (get tempids tempid)]
+            (if-let [id (get @tempids tempid)]
               id
               (let [eid (get-and-inc conn txn :last-eid)]
-                (vswap! tempids assoc! tempid eid)
+                (vswap! tempids assoc tempid eid)
                 eid)))
 
-          (hydrate [data]
+          (hydrate [[eid :as data]]
             (if-not (:hydrated (meta data))
-              (let [id (first data)
-                    data (with-meta data {:hydrated true})]
+              (let [data (with-meta data {:hydrated true})]
                 (cond
-                  (int? id)
-                  (if (entity-by-id conn txn id)
+                  (int? eid)
+                  (if (entity-by-id conn txn eid)
                     data
-                    (throw (ex-info "entity not found" {:eid id})))
+                    (throw (ex-info "entity not found" {:eid eid})))
 
-                  (string? id)
-                  (assoc data 0 (tempid->eid id))
+                  (string? eid)
+                  (assoc data 0 (tempid->eid eid))
 
                   :default
                   (assoc data 0 (get-and-inc conn txn :last-eid))))
@@ -322,9 +322,19 @@
       (map validate)
       (mapcat to->datoms))))
 
-(defn vector->datoms
-  [conn txn tid t-tempids input]
-  )
+(defn vector->actions
+  [conn txn tid [action eid attr value]]
+  (case action
+    :db.fn/retractEntity
+    (if-let [entity (entity-by-id conn txn eid)]
+      (eduction (filter (fn [[attr value]] [eid attr value tid false])) entity)
+      (throw (ex-info "entity not found" {:eid eid})))
+
+    :db/add
+    [[eid attr value true]]
+
+    :db/retract
+    [[eid attr value false]]))
 
 (defn update-indexes
   [^Connection conn ^Txn txn [eid attr _ _ op :as datom]]
@@ -351,7 +361,6 @@
                     datoms (into (:datoms state)
                                  (comp
                                    (action->datoms conn txn tid t-tempids)
-                                   (map (fn [x] (println x) x))
                                    (mapcat (partial update-indexes conn txn)))
                                  (map->actions input))]
                 {:tempids @t-tempids
@@ -360,15 +369,15 @@
               (vector? input)
               (let [t-tempids (volatile! (:tempids state))
                     datoms (into (:datoms state)
-                                 (mapcat (partial update-indexes conn txn))
-                                 (vector->datoms conn txn tid t-tempids input))]
+                                 (comp
+                                   (action->datoms conn txn tid t-tempids)
+                                   (mapcat (partial update-indexes conn txn)))
+                                 (vector->actions conn txn tid input))]
                 {:tempids @t-tempids
                  :datoms  datoms})))]
 
-    (let [{:keys [tempids datoms]} (reduce step {:tempids (transient {})
-                                                 :datoms  []} tx-data)]
-      {:tempids (persistent! tempids)
-       :datoms  datoms})))
+    (reduce step {:tempids {}
+                  :datoms  []} tx-data)))
 
 (defn transact
   [^Connection conn data]
