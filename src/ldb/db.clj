@@ -221,6 +221,111 @@
              (halt-when any?))]
     (transduce xf identity nil (scan-key (.-eavt-current conn) txn eid))))
 
+(defn map->actions
+  [m]
+  (when (:db/ident m)
+    (s/explain ::schema m))
+  (eduction (map (fn [[k v]] [nil k v true])) m))
+
+(defn action->datoms
+  [^Connection conn ^Txn txn ^Integer tid tempids]
+  (letfn [(tempid->eid [tempid]
+            (if-let [id (get tempids tempid)]
+              id
+              (let [eid (get-and-inc conn txn :last-eid)]
+                (vswap! tempids assoc! tempid eid)
+                eid)))
+
+          (hydrate [data]
+            (if-not (:hydrated (meta data))
+              (let [id (first data)
+                    data (with-meta data {:hydrated true})]
+                (cond
+                  (int? id)
+                  (if (entity-by-id conn txn id)
+                    data
+                    (throw (ex-info "entity not found" {:eid id})))
+
+                  (string? id)
+                  (assoc data 0 (tempid->eid id))
+
+                  :default
+                  (assoc data 0 (get-and-inc conn txn :last-eid))))
+              data))
+
+          (filter-attr [[eid attr value]]
+            (and (not= attr :db/id)
+                 (not= value (get (entity-by-id conn txn eid) attr))))
+
+          (update-ident [[eid attr value op]]
+            (when (= :db/ident attr)
+              (insert-ident conn txn value eid))
+            (if-let [ident (to-ident conn txn attr)]
+              [eid ident attr value op]
+              (throw (ex-info "ident not found" {:attr  attr
+                                                 :value value}))))
+
+          (validate [[_ ident _ value :as all]]
+            (when-not (neg? ident)
+              (let [schema (entity-by-id conn txn ident)]
+                (validate-value value schema)))
+            all)
+
+          (to->datoms [[eid ident attr value op]]
+            (if (neg? ident)
+              [[eid ident value tid op]]
+              (let [value (if (coll? value) (set value) value)
+                    old-value (get (entity-by-id conn txn eid) attr)
+                    {:db/keys [valueType cardinality]} (entity-by-id conn txn ident)]
+
+                (case cardinality
+                  :db.cardinality/one
+                  (case valueType
+                    :db.type/ref
+                    (let [value (sequence (map hydrate) (map->actions value))
+                          ref-datom (eduction (action->datoms conn txn tid tempids) value)
+                          id (ffirst value)
+                          datoms (if (and op old-value)
+                                   [[eid ident old-value tid false]
+                                    [eid ident id tid true]]
+                                   [[eid ident id tid op]])]
+                      (eduction cat [datoms ref-datom]))
+
+                    (if old-value
+                      [[eid ident old-value tid false]
+                       [eid ident value tid true]]
+                      [[eid ident value tid true]]))
+
+                  :db.cardinality/many
+                  (case valueType
+                    :db.type/ref
+                    (let [value (sequence (comp (mapcat map->actions)
+                                                (map hydrate)) value)
+                          ref-datoms (eduction (action->datoms conn txn tid tempids) value)
+                          ids (into #{} (map first) value)
+                          datoms (if (and op old-value)
+                                   [[eid ident old-value tid false]
+                                    [eid ident (into ids old-value) tid true]]
+                                   [[eid ident ids tid op]])]
+                      (println eid ident attr value op)
+                      (eduction cat [datoms ref-datoms]))
+
+                    (if (and op old-value)
+                      [[eid ident old-value tid false]
+                       [eid ident (into value old-value) tid true]]
+                      [[eid ident value tid op]]))))))]
+
+    (comp
+      (map hydrate)
+      (filter filter-attr)
+      (map update-ident)
+      (map validate)
+      (mapcat to->datoms))))
+
+(defn vector->datoms
+  [conn txn tid t-tempids input]
+  )
+
 (defn update-indexes
   [^Connection conn ^Txn txn [eid attr _ _ op :as datom]]
   (if op
@@ -237,103 +342,6 @@
       (del-kv (.-aevt-current conn) txn rattr to-retract)
       [datom to-retract])))
 
-(defn map->datoms
-  [^Connection conn ^Txn txn ^Integer tid tempids data]
-  (when (:db/ident data)
-    (s/explain ::schema data))
-
-  (let [tempid->eid (fn [tempid]
-                      (if-let [id (get tempids tempid)]
-                        id
-                        (let [eid (get-and-inc conn txn :last-eid)]
-                          (vswap! tempids assoc! tempid eid)
-                          eid)))
-        hydrate (fn [data]
-                  (if-not (:hydrated (meta data))
-                    (let [id (:db/id data)
-                          data (with-meta data {:hydrated true})]
-                      (cond
-                        (int? id)
-                        (if (entity-by-id conn txn id)
-                          data
-                          (throw (ex-info "entity not found" {:eid id})))
-
-                        (string? id)
-                        (assoc data :db/id (tempid->eid id))
-
-                        :default
-                        (assoc data :db/id (get-and-inc conn txn :last-eid))))
-                    data))
-
-        data (hydrate data)
-        old-entity (entity-by-id conn txn (:db/id data))
-        eid (:db/id data)]
-
-    (letfn [(filter-attr [[attr value]]
-              (and (not= attr :db/id)
-                   (not= value (get old-entity attr))))
-
-            (update-ident [[attr value]]
-              (when (= :db/ident attr)
-                (insert-ident conn txn value eid))
-              (if-let [ident (to-ident conn txn attr)]
-                [ident attr value]
-                (throw (ex-info "ident not found" {:attr  attr
-                                                   :value value}))))
-
-            (validate [[ident _ value :as all]]
-              (when-not (neg? ident)
-                (let [schema (entity-by-id conn txn ident)]
-                  (validate-value value schema)))
-              all)
-
-            (to->datoms [[ident attr value]]
-              (if (neg? ident)
-                [[eid ident value tid true]]
-                (let [value (if (coll? value) (set value) value)
-                      old-value (get old-entity attr)
-                      {:db/keys [valueType cardinality]} (entity-by-id conn txn ident)]
-
-                  (case cardinality
-                    :db.cardinality/one
-                    (case valueType
-                      :db.type/ref
-                      #(let [value (hydrate value)
-                             ref-datom (map->datoms conn txn tid value tempids)
-                             id (:db/id value)
-                             datoms (if old-value
-                                      [[eid ident old-value tid false]
-                                       [eid ident id tid true]]
-                                      [[eid ident id tid true]])]
-                         (eduction cat [datoms ref-datom]))
-
-                      (if old-value
-                        [[eid ident old-value tid false]
-                         [eid ident value tid true]]
-                        [[eid ident value tid true]]))
-
-                    :db.cardinality/many
-                    (case valueType
-                      :db.type/ref
-                      #(let [value (sequence (map hydrate) value)
-                             ref-datoms (eduction (mapcat (partial map->datoms conn txn tid tempids)) value)
-                             ids (into #{} (map :db/id) value)
-                             datoms (if old-value
-                                      [[eid ident old-value tid false]
-                                       [eid ident (into ids old-value) tid true]]
-                                      [[eid ident ids tid true]])]
-                         (eduction cat [datoms ref-datoms]))
-
-                      (if old-value
-                        [[eid ident old-value tid false]
-                         [eid ident (into value old-value) tid true]]
-                        [[eid ident value tid true]]))))))]
-
-      (eduction (filter filter-attr)
-                (map update-ident)
-                (map validate)
-                (mapcat (partial trampoline to->datoms)) data))))
-
 (defn insert->datoms
   [^Connection conn ^Txn txn ^Integer tid tx-data]
   (letfn [(step [state input]
@@ -341,10 +349,22 @@
               (map? input)
               (let [t-tempids (volatile! (:tempids state))
                     datoms (into (:datoms state)
+                                 (comp
+                                   (action->datoms conn txn tid t-tempids)
+                                   (map (fn [x] (println x) x))
+                                   (mapcat (partial update-indexes conn txn)))
+                                 (map->actions input))]
+                {:tempids @t-tempids
+                 :datoms  datoms})
+
+              (vector? input)
+              (let [t-tempids (volatile! (:tempids state))
+                    datoms (into (:datoms state)
                                  (mapcat (partial update-indexes conn txn))
-                                 (map->datoms conn txn tid t-tempids input))]
+                                 (vector->datoms conn txn tid t-tempids input))]
                 {:tempids @t-tempids
                  :datoms  datoms})))]
+
     (let [{:keys [tempids datoms]} (reduce step {:tempids (transient {})
                                                  :datoms  []} tx-data)]
       {:tempids (persistent! tempids)
