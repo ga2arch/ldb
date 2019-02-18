@@ -5,7 +5,8 @@
   (:import (org.lmdbjava Env DbiFlags PutFlags KeyRange CursorIterator Dbi Txn)
            (java.io File)
            (java.nio ByteBuffer ByteOrder)
-           (clojure.lang IReduceInit Named)))
+           (clojure.lang IReduceInit Named)
+           (java.util UUID HashMap)))
 
 (defrecord Connection [^Dbi eavt-current ^Dbi eavt-history
                        ^Dbi aevt-current ^Dbi aevt-history
@@ -225,16 +226,16 @@
   [m]
   (when (:db/ident m)
     (s/explain ::schema m))
-  (let [eid (:db/id m)]
+  (let [eid (or (:db/id m) (str (UUID/randomUUID)))]
     (eduction (map (fn [[attr value]] [eid attr value true])) m)))
 
 (defn action->datoms
   [^Connection conn ^Txn txn ^Integer tid tempids]
   (letfn [(tempid->eid [tempid]
-            (if-let [id (get @tempids tempid)]
+            (if-let [id (.get tempids tempid)]
               id
               (let [eid (get-and-inc conn txn :last-eid)]
-                (vswap! tempids assoc tempid eid)
+                (.put tempids tempid eid)
                 eid)))
 
           (hydrate [[eid :as data]]
@@ -355,28 +356,22 @@
 (defn insert->datoms
   [^Connection conn ^Txn txn ^Integer tid tx-data]
   (letfn [(step [state input]
-            (cond
-              (map? input)
-              (let [t-tempids (volatile! (:tempids state))
-                    datoms (into (:datoms state)
-                                 (comp
-                                   (action->datoms conn txn tid t-tempids)
-                                   (mapcat (partial update-indexes conn txn)))
-                                 (map->actions input))]
-                {:tempids @t-tempids
-                 :datoms  datoms})
+            (let [xs (cond
+                       (map? input)
+                       (map->actions input)
 
-              (vector? input)
-              (let [t-tempids (volatile! (:tempids state))
-                    datoms (into (:datoms state)
-                                 (comp
-                                   (action->datoms conn txn tid t-tempids)
-                                   (mapcat (partial update-indexes conn txn)))
-                                 (vector->actions conn txn tid input))]
-                {:tempids @t-tempids
-                 :datoms  datoms})))]
+                       (vector? input)
+                       (vector->actions conn txn tid input))
 
-    (reduce step {:tempids {}
+                  datoms (into (:datoms state)
+                               (comp
+                                 (action->datoms conn txn tid (:tempids state))
+                                 (mapcat (partial update-indexes conn txn)))
+                               xs)]
+              {:tempids (:tempids state)
+               :datoms  datoms}))]
+
+    (reduce step {:tempids (HashMap.)
                   :datoms  []} tx-data)))
 
 (defn transact
