@@ -2,7 +2,8 @@
   (:require [clojure.reflect :refer [reflect]])
   (:import (sun.misc Unsafe)
            (sun.nio.ch FileChannelImpl)
-           (java.io RandomAccessFile)))
+           (java.io RandomAccessFile File)
+           (java.nio.file Path Paths OpenOption StandardOpenOption)))
 
 (defn- get-java-method
   [clazz name & args]
@@ -27,18 +28,16 @@
 
 (defn open-file
   [^String loc]
-  (let [bf (RandomAccessFile. loc "rw")]
-    (.getChannel bf)))
+  (FileChannelImpl/open (.toPath (File. loc))
+                        (into-array OpenOption [StandardOpenOption/APPEND
+                                                StandardOpenOption/CREATE
+                                                StandardOpenOption/DSYNC])))
 
 (defn read-bytes
   [addr offset length]
   (let [data (byte-array length)]
     (.copyMemory unsafe nil (+ addr offset) data byte-array-offset length)
     data))
-
-(defn write-bytes
-  [addr offset data]
-  (.copyMemory unsafe data byte-array-offset nil (+ addr offset) (count data)))
 
 (comment
   (clojure.java.shell/sh "cat" "tmp")
