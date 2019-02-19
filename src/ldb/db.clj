@@ -1,7 +1,6 @@
 (ns ldb.db
   (:require [clojure.data.fressian :as fress]
-            [clojure.spec.alpha :as s]
-            [ldb.thread :refer [thread-local]])
+            [clojure.spec.alpha :as s])
   (:import (org.lmdbjava Env DbiFlags PutFlags KeyRange CursorIterator Dbi Txn)
            (java.io File)
            (java.nio ByteBuffer ByteOrder)
@@ -33,14 +32,11 @@
 
 (defn encode-key
   [data]
-  (cond
-    (int? data)
+  (if (int? data)
     (let [bkey (ByteBuffer/allocateDirect 8)]
       (.order bkey (ByteOrder/BIG_ENDIAN))
       (.putInt bkey data)
       (.flip bkey))
-
-    :else
     (let [data (fress/write data)
           bkey (ByteBuffer/allocateDirect (.limit data))]
       (.order bkey (ByteOrder/BIG_ENDIAN))
@@ -308,7 +304,6 @@
                                    [[eid ident old-value tid false]
                                     [eid ident (into ids old-value) tid true]]
                                    [[eid ident ids tid op]])]
-                      (println eid ident attr value op)
                       (eduction cat [datoms ref-datoms]))
 
                     (if (and op old-value)
