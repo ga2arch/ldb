@@ -19,11 +19,16 @@
 (def unmap0 (get-java-method FileChannelImpl "unmap0" Long/TYPE Long/TYPE))
 
 (defn mmap
-  [^String loc ^Integer mode ^Long offset ^Long size]
+  [^String loc ^Long size]
   (let [size (bit-and (+ size 0xfff) (bit-not 0xfff))]
     (with-open [bf (RandomAccessFile. loc "r")]
       (with-open [ch (.getChannel bf)]
-        (long (.invoke map0 ch (into-array Object [(int mode) (long offset) (long size)])))))))
+        (long (.invoke map0 ch (into-array Object [(int 0) (long 0) (long size)])))))))
+
+(defn open-file
+  [^String loc]
+  (let [bf (RandomAccessFile. loc "rw")]
+    (.getChannel bf)))
 
 (defn read-bytes
   [addr offset length]
@@ -31,6 +36,9 @@
     (.copyMemory unsafe nil (+ addr offset) data byte-array-offset length)
     data))
 
+(defn write-bytes
+  [addr offset data]
+  (.copyMemory unsafe data byte-array-offset nil (+ addr offset) (count data)))
 
 (comment
   (clojure.java.shell/sh "cat" "tmp")
