@@ -2,8 +2,8 @@
   (:require [clojure.reflect :refer [reflect]])
   (:import (sun.misc Unsafe)
            (sun.nio.ch FileChannelImpl)
-           (java.io RandomAccessFile File)
-           (java.nio.file Path Paths OpenOption StandardOpenOption)))
+           (java.nio.file OpenOption StandardOpenOption Paths)
+           (java.io File)))
 
 (defn- get-java-method
   [clazz name & args]
@@ -22,16 +22,21 @@
 (defn mmap
   [^String loc ^Long size]
   (let [size (bit-and (+ size 0xfff) (bit-not 0xfff))]
-    (with-open [bf (RandomAccessFile. loc "r")]
-      (with-open [ch (.getChannel bf)]
-        (long (.invoke map0 ch (into-array Object [(int 0) (long 0) (long size)])))))))
+    (with-open [ch (FileChannelImpl/open
+                     (Paths/get loc (into-array String []))
+                     (into-array OpenOption [StandardOpenOption/READ
+                                             StandardOpenOption/SPARSE
+                                             StandardOpenOption/CREATE]))]
+      (long (.invoke map0 ch (into-array Object [(int 0) (long 0) (long size)]))))))
 
 (defn open-file
   [^String loc]
-  (FileChannelImpl/open (.toPath (File. loc))
-                        (into-array OpenOption [StandardOpenOption/APPEND
-                                                StandardOpenOption/CREATE
-                                                StandardOpenOption/DSYNC])))
+  (FileChannelImpl/open
+    (.toPath (File. loc))
+    (into-array OpenOption [StandardOpenOption/APPEND
+                            StandardOpenOption/SPARSE
+                            StandardOpenOption/CREATE
+                            StandardOpenOption/DSYNC])))
 
 (defn read-bytes
   [addr offset length]
