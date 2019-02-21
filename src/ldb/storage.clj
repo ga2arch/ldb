@@ -5,6 +5,8 @@
            (java.nio.file OpenOption StandardOpenOption Paths)
            (java.io File)))
 
+;; memory
+
 (defn- get-java-method
   [clazz name & args]
   (doto
@@ -43,6 +45,21 @@
   (let [data (byte-array length)]
     (.copyMemory unsafe nil (+ addr offset) data byte-array-offset length)
     data))
+
+;; tree
+
+(defrecord LeafPage [keys values])
+(defrecord IndexPage [keys leaves])
+
+(def root (IndexPage. [] []))
+
+(defn insert
+  [{:keys [keys leaves]} key value]
+  (let [leaf (->> (map-indexed vector keys)
+                  (drop-while (fn [[_ k]] (> key k)))
+                  (ffirst)
+                  (nth leaves))]
+    ))
 
 (comment
   (clojure.java.shell/sh "cat" "tmp")
