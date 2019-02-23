@@ -84,34 +84,36 @@
   (when-let [v (.get db txn (encode-key key))]
     (decode v)))
 
-(defn scan-key
-  [^Dbi db ^Txn txn key]
+(defn scan
+  [^Dbi db ^Txn txn ^KeyRange range]
   (reify IReduceInit
     (reduce [this f init]
-      (let [ekey (encode-key key)
-            ^CursorIterator it (.iterate db txn (KeyRange/closed ekey ekey))]
+      (let [^CursorIterator it (.iterate db txn range)]
         (try
           (loop [state init]
             (if (reduced? state)
               @state
               (if (.hasNext it)
-                (recur (f state (decode (.val (.next it)))))
+                (recur (f state (.next it)))
                 state)))
           (finally
             (.close it)))))))
+
+(defn scan-key
+  [^Dbi db ^Txn txn key]
+  (let [ekey (encode-key key)
+        range (KeyRange/closed ekey ekey)]
+    (eduction (map #(decode (.val %))) (scan db txn range))))
 
 (defn scan-all
   ([^Dbi db ^Txn txn]
    (scan-all db txn false))
   ([^Dbi db ^Txn txn int-key?]
-   (let [^CursorIterator it (.iterate db txn (KeyRange/all))]
-     (let [vals (volatile! {})]
-       (while (.hasNext it)
-         (let [kv (.next it)
-               k (decode-key (.key kv) int-key?)
-               v (decode (.val kv))]
-           (vswap! vals (fn [vals] (update vals k (fn [a] ((fnil conj []) a v)))))))
-       @vals))))
+   (letfn [(rf [kv]
+             (let [k (decode-key (.key kv) int-key?)
+                   v (decode (.val kv))]
+               [k v]))]
+     (eduction (map rf) (scan db txn (KeyRange/all))))))
 
 (defn del-key
   [^Dbi db ^Txn txn key]
@@ -225,10 +227,13 @@
     (transduce xf identity nil (scan-key (.-eavt-current conn) txn eid))))
 
 (defn map->actions
-  [m]
+  [^Connection conn ^Txn txn m]
   (when (:db/ident m)
-    (s/explain ::schema m))
-  (let [eid (or (:db/id m) (str (UUID/randomUUID)))]
+    (when-let [ex (s/explain-data ::schema m)]
+      (throw (ex-info "invalid schema" ex))))
+  (let [eid (or (:db/id m)
+                (to-ident conn txn (:db/ident m))
+                (str (UUID/randomUUID)))]
     (eduction (map (fn [[attr value]] [eid attr value true])) m)))
 
 (defn action->datoms
@@ -276,7 +281,11 @@
 
           (to->datoms [[eid ident attr value op]]
             (if (neg? ident)
-              [[eid ident value tid op]]
+              (if-let [old-value (get (entity-by-id conn txn eid) attr)]
+                [[eid ident old-value tid false]
+                 [eid ident value tid true]]
+                [[eid ident value tid true]])
+
               (let [value (if (coll? value) (set value) value)
                     old-value (get (entity-by-id conn txn eid) attr)
                     {:db/keys [valueType cardinality]} (entity-by-id conn txn ident)]
@@ -287,7 +296,7 @@
                     :db.type/ref
                     (cond
                       (map? value)
-                      (let [value (sequence (map hydrate) (map->actions value))
+                      (let [value (sequence (map hydrate) (map->actions conn txn value))
                             ref-datom (eduction (action->datoms conn txn tid tempids) value)
                             id (ffirst value)
                             datoms (if (and op old-value)
@@ -315,7 +324,7 @@
                     :db.type/ref
                     (cond
                       (map? (first value))
-                      (let [value (sequence (comp (mapcat map->actions)
+                      (let [value (sequence (comp (mapcat (partial map->actions conn txn))
                                                   (map hydrate)) value)
                             ref-datoms (eduction (action->datoms conn txn tid tempids) value)
                             ids (into #{} (map first) value)
@@ -381,7 +390,7 @@
   (letfn [(step [state input]
             (let [xs (cond
                        (map? input)
-                       (map->actions input)
+                       (map->actions conn txn input)
 
                        (vector? input)
                        (vector->actions conn txn tid input))
@@ -410,12 +419,14 @@
 (defn show-db
   [{:keys [eavt-current eavt-history aevt-current aevt-history status ident] :as conn}]
   (with-open [txn (txn-read conn)]
-    {:eavt   {:current (into (sorted-map) (scan-all eavt-current txn true))
-              :history (into (sorted-map) (scan-all eavt-history txn true))}
-     :aevt   {:current (into (sorted-map) (scan-all aevt-current txn true))
-              :history (into (sorted-map) (scan-all aevt-history txn true))}
-     :status (scan-all status txn)
-     :ident  (scan-all ident txn)}))
+    (letfn [(load-index [db]
+              (into (sorted-map) (group-by first (eduction (map second) (scan-all db txn)))))]
+      {:eavt   {:current (load-index eavt-current)
+                :history (load-index eavt-history)}
+       :aevt   {:current (load-index aevt-current)
+                :history (load-index aevt-history)}
+       :status (into [] (scan-all status txn))
+       :ident  (into [] (scan-all ident txn))})))
 
 ;; query
 

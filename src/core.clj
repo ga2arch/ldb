@@ -16,7 +16,7 @@
                                                    [?eid :surname "Carrettoni"]]})))
 
   (d/transact conn {:tx-data [{:db/ident       :name
-                               :db/valueType   :db.type/string
+                               :db/valueType   :db.type/ref
                                :db/cardinality :db.cardinality/one}
 
                               {:db/ident       :surname
@@ -27,9 +27,10 @@
                                :db/valueType   :db.type/ref
                                :db/cardinality :db.cardinality/many}]})
 
-  (d/transact conn {:tx-data [{:name    "Gabriele"
+  (d/transact conn {:tx-data [{
+                               :name    "Kek"
                                :surname "Carrettoni"
-                               :address [3]}]})
+                               }]})
 
 
 
