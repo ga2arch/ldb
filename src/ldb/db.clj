@@ -172,6 +172,11 @@
        (when-not (empty? entity)
          (assoc entity :db/id eid))))))
 
+(defn entity-by-ids
+  [^Connection conn ^Txn txn eids]
+  (eduction (map (partial entity-by-id conn txn))
+            (filter (complement nil?)) eids))
+
 (defn get-and-inc
   [^Connection conn ^Txn txn key]
   (let [eid (or (get-key (.-status conn) txn key) -1)]
@@ -191,7 +196,8 @@
     (keyword? value)
 
     :db.type/ref
-    (map? value)
+    (or (map? value)
+        (int? value))
 
     false))
 
@@ -279,14 +285,25 @@
                   :db.cardinality/one
                   (case valueType
                     :db.type/ref
-                    (let [value (sequence (map hydrate) (map->actions value))
-                          ref-datom (eduction (action->datoms conn txn tid tempids) value)
-                          id (ffirst value)
-                          datoms (if (and op old-value)
-                                   [[eid ident old-value tid false]
-                                    [eid ident id tid true]]
-                                   [[eid ident id tid op]])]
-                      (eduction cat [datoms ref-datom]))
+                    (cond
+                      (map? value)
+                      (let [value (sequence (map hydrate) (map->actions value))
+                            ref-datom (eduction (action->datoms conn txn tid tempids) value)
+                            id (ffirst value)
+                            datoms (if (and op old-value)
+                                     [[eid ident old-value tid false]
+                                      [eid ident id tid true]]
+                                     [[eid ident id tid op]])]
+                        (eduction cat [datoms ref-datom]))
+
+                      (int? value)
+                      (do
+                        (when-not (entity-by-id conn txn value)
+                          (throw (ex-info "entity not found" {:eid value})))
+                        (if (and op old-value)
+                          [[eid ident old-value tid false]
+                           [eid ident (conj value old-value) tid true]]
+                          [[eid ident value tid op]])))
 
                     (if old-value
                       [[eid ident old-value tid false]
@@ -296,15 +313,26 @@
                   :db.cardinality/many
                   (case valueType
                     :db.type/ref
-                    (let [value (sequence (comp (mapcat map->actions)
-                                                (map hydrate)) value)
-                          ref-datoms (eduction (action->datoms conn txn tid tempids) value)
-                          ids (into #{} (map first) value)
-                          datoms (if (and op old-value)
-                                   [[eid ident old-value tid false]
-                                    [eid ident (into ids old-value) tid true]]
-                                   [[eid ident ids tid op]])]
-                      (eduction cat [datoms ref-datoms]))
+                    (cond
+                      (map? (first value))
+                      (let [value (sequence (comp (mapcat map->actions)
+                                                  (map hydrate)) value)
+                            ref-datoms (eduction (action->datoms conn txn tid tempids) value)
+                            ids (into #{} (map first) value)
+                            datoms (if (and op old-value)
+                                     [[eid ident old-value tid false]
+                                      [eid ident (into ids old-value) tid true]]
+                                     [[eid ident ids tid op]])]
+                        (eduction cat [datoms ref-datoms]))
+
+                      (int? (first value))
+                      (do
+                        (when (empty? (entity-by-ids conn txn value))
+                          (throw (ex-info "entity not found" {:eid value})))
+                        (if (and op old-value)
+                          [[eid ident old-value tid false]
+                           [eid ident (into old-value value) tid true]]
+                          [[eid ident (set value) tid op]])))
 
                     (if (and op old-value)
                       [[eid ident old-value tid false]

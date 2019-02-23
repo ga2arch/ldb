@@ -28,7 +28,8 @@
                                :db/cardinality :db.cardinality/many}]})
 
   (d/transact conn {:tx-data [{:name    "Gabriele"
-                               :surname "Carrettoni"}]})
+                               :surname "Carrettoni"
+                               :address [3]}]})
 
 
 
