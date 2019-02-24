@@ -378,8 +378,11 @@
       [datom])
 
     (let [[reid rattr :as to-retract] (find-datom conn txn datom)]
-      (put-key (.-eavt-history conn) txn eid datom)
-      (put-key (.-aevt-history conn) txn attr datom)
+      (put-key (.-eavt-current conn) txn eid datom)
+      (put-key (.-aevt-current conn) txn attr datom)
+
+      (put-key (.-eavt-history conn) txn eid to-retract)
+      (put-key (.-aevt-history conn) txn attr to-retract)
 
       (del-kv (.-eavt-current conn) txn reid to-retract)
       (del-kv (.-aevt-current conn) txn rattr to-retract)
@@ -511,7 +514,9 @@
               (mapcat (fn [frame]
                         (let [pattern (update-pattern conn txn frame pattern)
                               datoms (load-datoms conn txn pattern)]
-                          (eduction (match-pattern frame pattern) datoms)))))
+                          (eduction
+                            (filter (fn [[_ _ _ _ op]] op))
+                            (match-pattern frame pattern) datoms)))))
             (substitute [frame]
               (mapv (partial get frame) find))]
       (let [frames (eduction (apply comp (mapv rf where)) [{}])]
