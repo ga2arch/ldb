@@ -494,7 +494,7 @@
   [frame pattern]
   (comp
     (map (partial match-datom frame pattern))
-    (filter (comp not nil?))))
+    (filter (complement nil?))))
 
 (defn update-pattern
   [conn txn frame [eid attr value]]
@@ -506,16 +506,13 @@
 
 (defn q
   [^Connection conn {:keys [find where]}]
-  (letfn [(reducing-fn
-            [txn frames pattern]
-            (let [xf (mapcat (fn [frame]
-                               (let [pattern (update-pattern conn txn frame pattern)
-                                     datoms (load-datoms conn txn pattern)]
-                                 (eduction (match-pattern frame pattern) datoms))))]
-              (into [] xf frames)))]
-
-    (let [frames (with-open [txn (txn-read conn)]
-                   (reduce (partial reducing-fn txn) [{}] where))]
-      (for [frame frames]
-        (for [f find]
-          (get frame f))))))
+  (with-open [txn (txn-read conn)]
+    (letfn [(rf [pattern]
+              (mapcat (fn [frame]
+                        (let [pattern (update-pattern conn txn frame pattern)
+                              datoms (load-datoms conn txn pattern)]
+                          (eduction (match-pattern frame pattern) datoms)))))
+            (substitute [frame]
+              (mapv (partial get frame) find))]
+      (let [frames (eduction (apply comp (mapv rf where)) [{}])]
+        (mapv substitute frames)))))

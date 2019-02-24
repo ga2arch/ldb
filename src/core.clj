@@ -16,7 +16,7 @@
                                                    [?eid :surname "Carrettoni"]]})))
 
   (d/transact conn {:tx-data [{:db/ident       :name
-                               :db/valueType   :db.type/ref
+                               :db/valueType   :db.type/string
                                :db/cardinality :db.cardinality/one}
 
                               {:db/ident       :surname
@@ -39,7 +39,7 @@
       (d/show-db conn))
 
   (d/entities-by-id conn (d/q conn {:find  '[?eid]
-                                    :where '[[?eid :name "Gabriele"]
+                                    :where '[[?eid :name "Kek"]
                                              [?eid :surname "Carrettoni"]]}))
 
 
