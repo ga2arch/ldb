@@ -226,6 +226,8 @@
              (halt-when any?))]
     (transduce xf identity nil (scan-key (.-eavt-current conn) txn eid))))
 
+(defn ^:dynamic gen-tempid [])
+
 (defn map->actions
   [^Connection conn ^Txn txn m]
   (when (:db/ident m)
@@ -234,7 +236,7 @@
 
   (let [get-eid (fn [m] (or (:db/id m)
                             (to-ident conn txn (:db/ident m))
-                            (str (UUID/randomUUID))))
+                            (gen-tempid)))
         eid (get-eid m)
         xf (fn [[attr value]]
              (cond
@@ -401,7 +403,10 @@
   (let [tx-data (:tx-data data)]
     (with-open [txn (txn-write conn)]
       (let [tid (System/currentTimeMillis)]
-        (binding [entity-by-id (memoize entity-by-id)]
+        (binding [entity-by-id (memoize entity-by-id)
+                  gen-tempid (let [counter (volatile! 0)]
+                               (fn []
+                                 (str (vswap! counter inc))))]
           (let [result (insert->datoms conn txn tid tx-data)]
             (txn-commit txn)
             result))))))
