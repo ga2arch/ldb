@@ -9,7 +9,7 @@
                  [criterium "0.4.4"]
                  [org.clojure/tools.namespace "0.3.0-alpha4"]
                  [org.clojure/spec.alpha "0.2.176"]
-                 [org.clojure/core.unify "0.5.7"]]
+                 [com.cognitect/anomalies "0.1.12"]]
   :main ^:skip-aot core
   :target-path "target/%s"
   :profiles {:uberjar {:aot :all}})
