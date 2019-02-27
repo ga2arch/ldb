@@ -149,17 +149,18 @@
     (letfn [(open-db [name flags]
               (.openDbi env name (into-array DbiFlags flags)))]
       (let [index-flags [DbiFlags/MDB_CREATE DbiFlags/MDB_DUPSORT]
-            conn (map->Connection {:env          env
-                                   :eavt         (open-db "eavt" index-flags)
-                                   :eavt-history (open-db "eavt-history" index-flags)
-                                   :aevt         (open-db "aevt" index-flags)
-                                   :aevt-history (open-db "aevt-history" index-flags)
-                                   :avet         (open-db "avet" index-flags)
-                                   :avet-history (open-db "avet-history" index-flags)
-                                   :vaet         (open-db "vaet" index-flags)
-                                   :vaet-history (open-db "vaet-history" index-flags)
-                                   :status       (open-db "status" [DbiFlags/MDB_CREATE])
-                                   :ident        (open-db "ident" [DbiFlags/MDB_CREATE])})]
+            conn (map->Connection
+                   {:env          env
+                    :eavt         (open-db "eavt" index-flags)
+                    :eavt-history (open-db "eavt-history" index-flags)
+                    :aevt         (open-db "aevt" index-flags)
+                    :aevt-history (open-db "aevt-history" index-flags)
+                    :avet         (open-db "avet" index-flags)
+                    :avet-history (open-db "avet-history" index-flags)
+                    :vaet         (open-db "vaet" index-flags)
+                    :vaet-history (open-db "vaet-history" index-flags)
+                    :status       (open-db "status" [DbiFlags/MDB_CREATE])
+                    :ident        (open-db "ident" [DbiFlags/MDB_CREATE])})]
         (with-open [txn (txn-write conn)]
           (doseq [[i ident] (map-indexed vector schema-idents)]
             (insert-ident conn txn ident (- (inc i))))
@@ -179,10 +180,8 @@
        (when-not (empty? entity)
          (assoc entity :db/id eid))))))
 
-(defn entity-by-ids
-  [^Connection conn ^Txn txn eids]
-  (eduction (map (partial entity-by-id conn txn))
-            (filter (complement nil?)) eids))
+(defn entities-by-ids [conn eids]
+  (map (fn [[eid]] (entity-by-id conn eid)) eids))
 
 (defn get-and-inc
   [^Connection conn ^Txn txn key]
@@ -210,7 +209,6 @@
 
 (defn valid-value?
   [{:db/keys [_ valueType cardinality]} value]
-  (println value valueType cardinality)
   (case cardinality
     :db.cardinality/one
     (valid-type? valueType value)
@@ -512,20 +510,20 @@
   (letfn [(unify [var] (get frame var var))]
     [(unify eid) (to-ident conn txn (unify attr)) (unify value)]))
 
-(defn entities-by-id [conn eids]
-  (map (fn [[eid]] (entity-by-id conn eid)) eids))
-
 (defn q
-  [^Connection conn {:keys [find where]}]
-  (with-open [txn (txn-read conn)]
-    (letfn [(rf [pattern]
-              (mapcat (fn [frame]
-                        (let [pattern (update-pattern conn txn frame pattern)
-                              datoms (load-datoms conn txn pattern)]
-                          (eduction
-                            (filter (fn [[_ _ _ _ op]] op))
-                            (match-pattern frame pattern) datoms)))))
-            (substitute [frame]
-              (mapv (partial get frame) find))]
-      (let [frames (eduction (apply comp (mapv rf where)) [{}])]
-        (mapv substitute frames)))))
+  ([^Connection conn data]
+   (with-open [txn (txn-read conn)]
+     (into [] (q conn txn data))))
+
+  ([^Connection conn ^Txn txn {:keys [find where]}]
+   (letfn [(xf [pattern]
+             (mapcat (fn [frame]
+                       (let [pattern (update-pattern conn txn frame pattern)
+                             datoms (load-datoms conn txn pattern)]
+                         (eduction
+                           (filter (fn [[_ _ _ _ op]] op))
+                           (match-pattern frame pattern) datoms)))))
+           (substitute [frame]
+             (eduction (map (partial get frame)) find))]
+     (eduction (apply comp (mapv xf where))
+               (map substitute) [{}]))))

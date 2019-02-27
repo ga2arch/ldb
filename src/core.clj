@@ -11,7 +11,7 @@
 
   (time (def result (d/transact conn {:tx-data records})))
 
-  (time (d/entities-by-id conn (d/q conn {:find  '[?eid]
+  (time (d/entities-by-ids conn (d/q conn {:find '[?eid]
                                           :where '[[?eid :name ?name]
                                                    [?eid :surname "Carrettoni"]]})))
 
@@ -39,7 +39,7 @@
                                    :surname "Carrettoni"}]})
       (d/show-db conn))
 
-  (d/entities-by-id conn (d/q conn {:find  '[?eid]
+  (d/entities-by-ids conn (d/q conn {:find '[?eid]
                                     :where '[[?eid :name "Kek"]
                                              [?eid :surname "Carrettoni"]]}))
 
@@ -48,7 +48,7 @@
                                :name    "Giuseppe",
                                :surname "Cafarelli"}]})
 
-  (d/entities-by-id conn (d/q conn {:find  '[?eid]
+  (d/entities-by-ids conn (d/q conn {:find '[?eid]
                                     :where '[[?eid :name ?name]
                                              [?eid :surname "Cafarelli"]]}))
 
