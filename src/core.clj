@@ -12,8 +12,8 @@
   (time (def result (d/transact conn {:tx-data records})))
 
   (time (d/entities-by-ids conn (d/q conn {:find '[?eid]
-                                          :where '[[?eid :name ?name]
-                                                   [?eid :surname "Carrettoni"]]})))
+                                           :where '[[?eid :name ?name]
+                                                    [?eid :surname "Carrettoni"]]})))
 
   (d/transact conn {:tx-data [{:db/ident       :name
                                :db/valueType   :db.type/string
@@ -27,29 +27,25 @@
                                :db/valueType   :db.type/ref
                                :db/cardinality :db.cardinality/many}]})
 
-  (d/transact conn {:tx-data [{                             ;:db/id   3
+  (d/transact conn {:tx-data [{;:db/id   3
                                :name    "Kek"
                                :surname "Carrettoni"
-                               :address [{:name "kek"}]
-                               }]})
-
-
+                               :address [{:name "kek"}]}]})
 
   (do (d/transact conn {:tx-data [{:name    ["Gabriele"]
                                    :surname "Carrettoni"}]})
       (d/show-db conn))
 
   (d/entities-by-ids conn (d/q conn {:find '[?eid]
-                                    :where '[[?eid :name "Kek"]
-                                             [?eid :surname "Carrettoni"]]}))
-
+                                     :where '[[?eid :name "Kek"]
+                                              [?eid :surname "Carrettoni"]]}))
 
   (d/transact conn {:tx-data [{:db/id   (:db/id (first entities)),
                                :name    "Giuseppe",
                                :surname "Cafarelli"}]})
 
   (d/entities-by-ids conn (d/q conn {:find '[?eid]
-                                    :where '[[?eid :name ?name]
-                                             [?eid :surname "Cafarelli"]]}))
+                                     :where '[[?eid :name ?name]
+                                              [?eid :surname "Cafarelli"]]}))
 
   (d/show-db conn))

@@ -150,17 +150,17 @@
               (.openDbi env name (into-array DbiFlags flags)))]
       (let [index-flags [DbiFlags/MDB_CREATE DbiFlags/MDB_DUPSORT]
             conn (map->Connection
-                   {:env          env
-                    :eavt         (open-db "eavt" index-flags)
-                    :eavt-history (open-db "eavt-history" index-flags)
-                    :aevt         (open-db "aevt" index-flags)
-                    :aevt-history (open-db "aevt-history" index-flags)
-                    :avet         (open-db "avet" index-flags)
-                    :avet-history (open-db "avet-history" index-flags)
-                    :vaet         (open-db "vaet" index-flags)
-                    :vaet-history (open-db "vaet-history" index-flags)
-                    :status       (open-db "status" [DbiFlags/MDB_CREATE])
-                    :ident        (open-db "ident" [DbiFlags/MDB_CREATE])})]
+                  {:env          env
+                   :eavt         (open-db "eavt" index-flags)
+                   :eavt-history (open-db "eavt-history" index-flags)
+                   :aevt         (open-db "aevt" index-flags)
+                   :aevt-history (open-db "aevt-history" index-flags)
+                   :avet         (open-db "avet" index-flags)
+                   :avet-history (open-db "avet-history" index-flags)
+                   :vaet         (open-db "vaet" index-flags)
+                   :vaet-history (open-db "vaet-history" index-flags)
+                   :status       (open-db "status" [DbiFlags/MDB_CREATE])
+                   :ident        (open-db "ident" [DbiFlags/MDB_CREATE])})]
         (with-open [txn (txn-write conn)]
           (doseq [[i ident] (map-indexed vector schema-idents)]
             (insert-ident conn txn ident (- (inc i))))
@@ -226,8 +226,8 @@
 (defn find-datom
   [^Connection conn ^Txn txn [eid attr value]]
   (let [xf (comp
-             (filter (fn [[ceid cattr cvalue]] (and (= ceid eid) (= cattr attr) (= cvalue value))))
-             (halt-when any?))]
+            (filter (fn [[ceid cattr cvalue]] (and (= ceid eid) (= cattr attr) (= cvalue value))))
+            (halt-when any?))]
     (transduce xf identity nil (scan-key (.-eavt conn) txn eid))))
 
 (defn ^:dynamic gen-tempid [])
@@ -255,7 +255,8 @@
                (let [new-eids (mapv get-eid value)
                      datom [eid attr (set new-eids) true]
                      values (mapcat (fn [value neid]
-                                      (map->actions conn txn (assoc value :db/id neid))) value new-eids)]
+                                      (map->actions conn txn (assoc value :db/id neid)))
+                                    value new-eids)]
                  (eduction cat [[datom] values]))
 
                :else
@@ -341,11 +342,11 @@
                     [[eid ident value tid true]])))))]
 
     (comp
-      (map hydrate)
-      (filter filter-attr)
-      (map update-ident)
-      (map validate)
-      (mapcat ->datoms))))
+     (map hydrate)
+     (filter filter-attr)
+     (map update-ident)
+     (map validate)
+     (mapcat ->datoms))))
 
 (defn vector->actions
   [conn txn tid [action eid attr value]]
@@ -400,8 +401,8 @@
 
                   datoms (into (:datoms state)
                                (comp
-                                 (action->datoms conn txn tid (:tempids state))
-                                 (mapcat (partial update-indexes conn txn)))
+                                (action->datoms conn txn tid (:tempids state))
+                                (mapcat (partial update-indexes conn txn)))
                                xs)]
               {:tempids (:tempids state)
                :datoms  datoms}))]
@@ -477,13 +478,13 @@
       :else
       (if-not (binding-var? val)
         (eduction
-          (mapcat second)
-          filter-val
-          (scan-all (.-aevt conn) txn))
+         (mapcat second)
+         filter-val
+         (scan-all (.-aevt conn) txn))
 
         (eduction
-          (mapcat second)
-          (scan-all (.-aevt conn) txn))))))
+         (mapcat second)
+         (scan-all (.-aevt conn) txn))))))
 
 (defn match-datom
   [frame pattern datom]
@@ -502,8 +503,8 @@
 (defn match-pattern
   [frame pattern]
   (comp
-    (map (partial match-datom frame pattern))
-    (filter (complement nil?))))
+   (map (partial match-datom frame pattern))
+   (filter (complement nil?))))
 
 (defn update-pattern
   [conn txn frame [eid attr value]]
@@ -521,8 +522,8 @@
                        (let [pattern (update-pattern conn txn frame pattern)
                              datoms (load-datoms conn txn pattern)]
                          (eduction
-                           (filter (fn [[_ _ _ _ op]] op))
-                           (match-pattern frame pattern) datoms)))))
+                          (filter (fn [[_ _ _ _ op]] op))
+                          (match-pattern frame pattern) datoms)))))
            (substitute [frame]
              (eduction (map (partial get frame)) find))]
      (eduction (apply comp (mapv xf where))
