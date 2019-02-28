@@ -1,3 +1,5 @@
+<img src="http://img.shields.io/liberapay/receives/ga2arch.svg?logo=liberapay">
+
 <noscript><a href="https://liberapay.com/ga2arch/donate"><img alt="Donate using Liberapay" src="https://liberapay.com/assets/widgets/donate.svg"></a></noscript>
 
 ldb
