@@ -1,3 +1,6 @@
+<img src="http://img.shields.io/liberapay/receives/ga2arch.svg?logo=liberapay">
+
+
 ldb
 ========================================
 
