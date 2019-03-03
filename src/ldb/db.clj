@@ -1,12 +1,14 @@
 (ns ldb.db
   (:require [clojure.data.fressian :as fress]
-            [clojure.spec.alpha :as s])
+            [clojure.spec.alpha :as s]
+            [clojure.set])
   (:import (org.lmdbjava Env DbiFlags PutFlags KeyRange CursorIterator Dbi Txn)
            (java.io File)
            (java.nio ByteBuffer ByteOrder)
            (clojure.lang IReduceInit Named)
            (java.util UUID HashMap)
-           (java.time Instant)))
+           (java.time Instant)
+           (net.openhft.hashing LongHashFunction)))
 
 (defrecord Connection [^Dbi eavt ^Dbi eavt-history
                        ^Dbi aevt ^Dbi aevt-history
@@ -56,6 +58,29 @@
       (.put bkey data)
       (.flip bkey))))
 
+(defn encode
+  [k v]
+  (let [v (fress/write v)
+        hash (.hashBytes (LongHashFunction/xx) v 0 (.limit v))
+        bval (ByteBuffer/allocateDirect (.limit v))]
+    (.order bval (ByteOrder/BIG_ENDIAN))
+    (.put bval v)
+    (.flip bval)
+    (if (int? k)
+      (let [bkey (doto (ByteBuffer/allocateDirect 16)
+                   (.order (ByteOrder/BIG_ENDIAN))
+                   (.putInt k)
+                   (.putLong hash)
+                   (.flip))]
+        [bkey bval])
+      (let [k (fress/write k)
+            bkey (doto (ByteBuffer/allocateDirect (+ (.limit k) 8))
+                   (.order (ByteOrder/BIG_ENDIAN))
+                   (.put k)
+                   (.putLong hash)
+                   (.flip))]
+        [bkey bval]))))
+
 (defn encode-val
   [data]
   (let [data (fress/write data)
@@ -92,6 +117,11 @@
   [^Dbi db ^Txn txn key val]
   (.put db txn (encode-key key) (encode-val val) (into-array PutFlags [])))
 
+(defn put-key-hash
+  [^Dbi db ^Txn txn key val]
+  (let [[k v] (encode key val)]
+    (.put db txn k v (into-array PutFlags []))))
+
 (defn get-key
   [^Dbi db ^Txn txn key]
   (when-let [v (.get db txn (encode-key key))]
@@ -115,8 +145,12 @@
 (defn scan-key
   [^Dbi db ^Txn txn key]
   (let [ekey (encode-key key)
-        range (KeyRange/closed ekey ekey)]
-    (eduction (map #(decode (.val %))) (scan db txn range))))
+        range (KeyRange/greaterThan ekey)]
+    (eduction
+      (take-while (fn [kv]
+                    (let [k (decode-key (.key kv) (int? key))]
+                      (= key k))))
+      (map #(decode (.val %))) (scan db txn range))))
 
 (defn scan-all
   ([^Dbi db ^Txn txn]
@@ -134,7 +168,8 @@
 
 (defn del-kv
   [^Dbi db ^Txn txn key val]
-  (.delete db txn (encode-key key) (encode-val val)))
+  (let [[k _] (encode key val)]
+    (.delete db txn k)))
 
 (defn close
   [^Connection conn]
@@ -159,21 +194,20 @@
                      (.setMapSize 1099511627776)
                      (.setMaxDbs 10)
                      (.open (File. filepath) nil))]
-    (letfn [(open-db [name flags]
-              (.openDbi env name (into-array DbiFlags flags)))]
-      (let [index-flags [DbiFlags/MDB_CREATE DbiFlags/MDB_DUPSORT]
-            conn (map->Connection
+    (letfn [(open-db [name]
+              (.openDbi env name (into-array DbiFlags [DbiFlags/MDB_CREATE])))]
+      (let [conn (map->Connection
                    {:env          env
-                    :eavt         (open-db "eavt" index-flags)
-                    :eavt-history (open-db "eavt-history" index-flags)
-                    :aevt         (open-db "aevt" index-flags)
-                    :aevt-history (open-db "aevt-history" index-flags)
-                    :avet         (open-db "avet" index-flags)
-                    :avet-history (open-db "avet-history" index-flags)
-                    :vaet         (open-db "vaet" index-flags)
-                    :vaet-history (open-db "vaet-history" index-flags)
-                    :status       (open-db "status" [DbiFlags/MDB_CREATE])
-                    :ident        (open-db "ident" [DbiFlags/MDB_CREATE])})]
+                    :eavt         (open-db "eavt")
+                    :eavt-history (open-db "eavt-history")
+                    :aevt         (open-db "aevt")
+                    :aevt-history (open-db "aevt-history")
+                    :avet         (open-db "avet")
+                    :avet-history (open-db "avet-history")
+                    :vaet         (open-db "vaet")
+                    :vaet-history (open-db "vaet-history")
+                    :status       (open-db "status")
+                    :ident        (open-db "ident")})]
         (with-open [txn (txn-write conn)]
           (doseq [[i ident] (map-indexed vector schema-idents)]
             (insert-ident conn txn ident (- (inc i))))
@@ -205,7 +239,7 @@
          (assoc entity :db/id eid))))))
 
 (defn entities-by-ids [conn eids]
-  (map (fn [[eid]] (entity-by-id conn eid)) eids))
+  (mapv (fn [[eid]] (entity-by-id conn eid)) eids))
 
 (defn get-and-inc
   [^Connection conn ^Txn txn key]
@@ -391,21 +425,21 @@
               false))]
     (if op
       (do
-        (put-key (.-eavt conn) txn eid datom)
-        (put-key (.-aevt conn) txn attr datom)
-        (when (ref? attr) (put-key (.-vaet conn) txn value datom))
+        (put-key-hash (.-eavt conn) txn eid datom)
+        (put-key-hash (.-aevt conn) txn attr datom)
+        (when (ref? attr) (put-key-hash (.-vaet conn) txn value datom))
         [datom])
 
       (let [[reid rattr rvalue :as to-retract] (find-datom conn txn datom)]
-        (put-key (.-eavt-history conn) txn eid datom)
-        (put-key (.-aevt-history conn) txn attr datom)
-        (put-key (.-eavt-history conn) txn eid to-retract)
-        (put-key (.-aevt-history conn) txn attr to-retract)
+        (put-key-hash (.-eavt-history conn) txn eid datom)
+        (put-key-hash (.-aevt-history conn) txn attr datom)
+        (put-key-hash (.-eavt-history conn) txn eid to-retract)
+        (put-key-hash (.-aevt-history conn) txn attr to-retract)
         (del-kv (.-eavt conn) txn reid to-retract)
         (del-kv (.-aevt conn) txn rattr to-retract)
         (when (ref? attr)
-          (put-key (.-vaet-history conn) txn value datom)
-          (put-key (.-vaet-history conn) txn value to-retract)
+          (put-key-hash (.-vaet-history conn) txn value datom)
+          (put-key-hash (.-vaet-history conn) txn value to-retract)
           (del-kv (.-vaet conn) txn rvalue to-retract))
         [datom to-retract]))))
 

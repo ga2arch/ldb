@@ -1,5 +1,6 @@
 (ns core
-  (:require [ldb.db :as d]))
+  (:require [ldb.db :as d]
+            [clj-http.client :as client]))
 
 (def db ".")
 (def conn (d/connect db))
@@ -27,9 +28,27 @@
                                :db/valueType   :db.type/ref
                                :db/cardinality :db.cardinality/many}]})
 
+  (d/transact conn {:tx-data [{:db/ident       :paper/title
+                               :db/valueType   :db.type/string
+                               :db/cardinality :db.cardinality/one}
+                              {:db/ident       :paper/link
+                               :db/valueType   :db.type/string
+                               :db/cardinality :db.cardinality/one}
+                              {:db/ident       :paper/data
+                               :db/valueType   :db.type/bytes
+                               :db/cardinality :db.cardinality/one}]})
+
+  (def data (bytes (:body (client/get
+                            "https://www.ndss-symposium.org/wp-content/uploads/2019/02/ndss2019_02B-5_Wampler_paper.pdf"
+                            {:as :byte-array}))))
+
+  (d/transact conn {:tx-data [{:paper/title "Ex Spectre"
+                               :paper/link  "https://www.ndss-symposium.org/wp-content/uploads/2019/02/ndss2019_02B-5_Wampler_paper.pdf"
+                               :paper/data  (.getBytes "kek")}]})
+
   (d/transact conn {:tx-data [{                             ;:db/id   3
                                :name    "Kek"
-                               :surname "LOL"
+                               :surname "Carrettoni"
                                :address [{                  ;:db/id 4
                                           :name  "Via lol"}
                                          {
