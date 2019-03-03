@@ -5,7 +5,8 @@
            (java.io File)
            (java.nio ByteBuffer ByteOrder)
            (clojure.lang IReduceInit Named)
-           (java.util UUID HashMap)))
+           (java.util UUID HashMap)
+           (java.time Instant)))
 
 (defrecord Connection [^Dbi eavt ^Dbi eavt-history
                        ^Dbi aevt ^Dbi aevt-history
@@ -187,7 +188,7 @@
                           (assoc acc attr value)
 
                           :else
-                          (assoc acc attr [m value])))) {} (scan-key (.-eavt conn) txn eid))]
+                          (assoc acc attr #{m value})))) {} (scan-key (.-eavt conn) txn eid))]
        (when-not (empty? entity)
          (assoc entity :db/id eid))))))
 
@@ -203,18 +204,17 @@
 (defn valid-type?
   [valueType value]
   (case valueType
-    :db.type/long
-    (int? value)
-
-    :db.type/string
-    (string? value)
-
-    :db.type/keyword
-    (keyword? value)
-
-    :db.type/ref
-    (or (map? value)
-        (int? value))
+    :db.type/keyword (keyword? value)
+    :db.type/string (string? value)
+    :db.type/boolean (boolean? value)
+    :db.type/long (int? value)
+    :db.type/bigint (integer? value)
+    :db.type/float (float? value)
+    :db.type/double (double? value)
+    :db.type/ref (int? value)
+    :db.type/instant (instance? Instant value)
+    :db.type/uuid (instance? UUID value)
+    :db.type/bytes (bytes? value)
 
     false))
 
@@ -225,8 +225,10 @@
     (valid-type? valueType value)
 
     :db.cardinality/many
-    (and (coll? value)
-         (every? (partial valid-type? valueType) value))))
+    (if (= valueType :db.type/ref)
+      (int? value)
+      (and (coll? value)
+           (every? (partial valid-type? valueType) value)))))
 
 (defn validate-value
   [value schema]
@@ -241,7 +243,7 @@
              (halt-when any?))]
     (transduce xf identity nil (scan-key (.-eavt conn) txn eid))))
 
-(defn ^:dynamic gen-tempid [])
+(defn ^:dynamic gen-tempid [] (rand-int 99999))
 
 (defn map->actions
   [^Connection conn ^Txn txn m]
@@ -264,11 +266,11 @@
                (and (coll? value)
                     (map? (first value)))
                (let [new-eids (mapv get-eid value)
-                     datom [eid attr (set new-eids) true]
+                     datoms (mapv (fn [new-eid] [eid attr new-eid true]) new-eids)
                      values (mapcat (fn [value neid]
                                       (map->actions conn txn (assoc value :db/id neid)))
                                     value new-eids)]
-                 (eduction cat [[datom] values]))
+                 (eduction cat [datoms values]))
 
                :else
                [[eid attr value true]]))]
@@ -290,12 +292,7 @@
             (let [{:db/keys [valueType cardinality]} (load-schema attr)]
               (case valueType
                 :db.type/ref
-                (case cardinality
-                  :db.cardinality/one
-                  (if (string? value) (tempid->eid value) value)
-
-                  :db.cardinality/many
-                  (into #{} (map (fn [id] (if (string? id) (tempid->eid id) id)) value)))
+                (if (string? value) (tempid->eid value) value)
                 value)))
 
           (hydrate [[eid attr value tx op :as datom]]
@@ -332,10 +329,11 @@
 
           (->datoms [[eid ident attr value op]]
             (if (neg? ident)
-              (if-let [old-value (get (entity-by-id conn txn eid) attr)]
-                [[eid ident old-value tid false]
-                 [eid ident value tid true]]
-                [[eid ident value tid true]])
+              (let [old-value (get (entity-by-id conn txn eid) attr)]
+                (if (and op old-value)
+                  [[eid ident old-value tid false]
+                   [eid ident value tid true]]
+                  [[eid ident value tid op]]))
 
               (let [{:db/keys [cardinality]} (entity-by-id conn txn ident)]
                 (case cardinality
@@ -344,16 +342,20 @@
                     (if (and op old-value)
                       [[eid ident old-value tid false]
                        [eid ident value tid true]]
-                      [[eid ident value tid true]]))
+                      [[eid ident value tid op]]))
 
                   :db.cardinality/many
-                  (eduction (map (fn [val] [eid ident val tid true])) value)))))]
+                  (let [old-value (get (entity-by-id conn txn eid) attr)]
+                    (if (and op (contains? old-value value))
+                      []
+                      [[eid ident value tid op]]))))))]
 
     (comp
       (map hydrate)
       (filter filter-attr)
       (map update-ident)
       (map validate)
+      (map (fn [x] (println x) x))
       (mapcat ->datoms))))
 
 (defn vector->actions
