@@ -27,7 +27,6 @@
                    :db.type/uuid
                    :db.type/bytes})
 
-
 (s/def :db/ident keyword?)
 (s/def :db/id (s/or :id int?
                     :tempid string?))
@@ -41,7 +40,7 @@
 (def schema-idents (clojure.set/union
                      #{:db/ident :db/valueType :db/cardinality}
                      #{:db.cardinality/one :db.cardinality/many}
-                     value-types ))
+                     value-types))
 ;;
 
 (defn encode-key
@@ -359,8 +358,7 @@
 
                   :db.cardinality/many
                   (let [old-value (get (entity-by-id conn txn eid) attr)]
-                    (if (and op (contains? old-value value))
-                      []
+                    (when-not (and op (contains? old-value value))
                       [[eid ident value tid op]]))))))]
 
     (comp
@@ -368,7 +366,6 @@
       (filter filter-attr)
       (map update-ident)
       (map validate)
-      (map (fn [x] (println x) x))
       (mapcat ->datoms))))
 
 (defn vector->actions
