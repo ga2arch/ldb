@@ -15,20 +15,33 @@
                        ^Env env ^Dbi status ^Dbi ident])
 
 ;; specs
+(def value-types #{:db.type/keyword
+                   :db.type/string
+                   :db.type/boolean
+                   :db.type/long
+                   :db.type/bigint
+                   :db.type/float
+                   :db.type/double
+                   :db.type/ref
+                   :db.type/instant
+                   :db.type/uuid
+                   :db.type/bytes})
+
 
 (s/def :db/ident keyword?)
 (s/def :db/id (s/or :id int?
                     :tempid string?))
-(s/def :db/valueType #{:db.type/string :db.type/keyword :db.type/long :db.type/ref})
-(s/def :db/cardinality #{:db.cardinality/one :db.cardinality/many})
+(s/def :db/valueType value-types)
+(s/def :db/cardinality #{:db.cardinality/one
+                         :db.cardinality/many})
 (s/def ::schema (s/keys :req [:db/ident :db/valueType :db/cardinality]))
 
 ;; const
 
-(def schema-idents [:db/ident :db/valueType :db/cardinality
-                    :db.type/keyword :db.type/string :db.type/long :db.type/ref
-                    :db.cardinality/one :db.cardinality/many])
-
+(def schema-idents (clojure.set/union
+                     #{:db/ident :db/valueType :db/cardinality}
+                     #{:db.cardinality/one :db.cardinality/many}
+                     value-types ))
 ;;
 
 (defn encode-key
