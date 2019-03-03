@@ -27,10 +27,10 @@
                                :db/valueType   :db.type/ref
                                :db/cardinality :db.cardinality/many}]})
 
-  (d/transact conn {:tx-data [{:db/id   3
+  (d/transact conn {:tx-data [{                             ;:db/id   3
                                :name    "Kek"
-                               :surname "Carrettoni"
-                               :address [{:db/id 4
+                               :surname "LOL"
+                               :address [{                  ;:db/id 4
                                           :name  "Via lol"}
                                          {
                                           :name  "dub"}]}]})

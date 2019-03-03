@@ -465,38 +465,42 @@
   (when (instance? Named x)
     (.startsWith (name x) "?")))
 
+(defn lvar?
+  [x]
+  (or (binding-var? x) (= x '_)))
+
 (defn load-datoms
   [^Connection conn ^Txn txn [eid attr val]]
   (let [filter-attr (filter (fn [[_ dattr _]] (= dattr attr)))
         filter-val (filter (fn [[_ _ dval]] (= dval val)))]
     (cond
-      (not (binding-var? eid))
+      (not (lvar? eid))
       (cond
-        (and (not (binding-var? attr))
-             (not (binding-var? val)))
+        (and (not (lvar? attr))
+             (not (lvar? val)))
         (eduction filter-attr
                   filter-val
                   (scan-key (.-eavt conn) txn eid))
 
-        (not (binding-var? attr))
+        (not (lvar? attr))
         (eduction filter-attr
                   (scan-key (.-eavt conn) txn eid))
 
-        (not (binding-var? val))
+        (not (lvar? val))
         (eduction filter-val
                   (scan-key (.-eavt conn) txn eid))
 
         :else
         (scan-key (.-eavt conn) txn eid))
 
-      (not (binding-var? attr))
-      (if-not (binding-var? val)
+      (not (lvar? attr))
+      (if-not (lvar? val)
         (eduction filter-attr
                   (scan-key (.-aevt conn) txn attr))
         (scan-key (.-aevt conn) txn attr))
 
       :else
-      (if-not (binding-var? val)
+      (if-not (lvar? val)
         (eduction
           (mapcat second)
           filter-val
@@ -517,7 +521,7 @@
             datom-value (nth datom i)]
         (if (binding-var? binding-var)
           (recur (inc i) (assoc frame binding-var datom-value))
-          (when (= datom-value binded-value)
+          (when (or (= '_ binded-value) (= datom-value binded-value))
             (recur (inc i) frame)))))))
 
 (defn match-pattern
