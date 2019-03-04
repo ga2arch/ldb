@@ -60,7 +60,15 @@
       (.put bkey data)
       (.flip bkey))))
 
-(defn encode
+(defn encode-val
+  [data]
+  (let [data (fress/write data)
+        bkey (ByteBuffer/allocateDirect (.limit data))]
+    (.order bkey (ByteOrder/BIG_ENDIAN))
+    (.put bkey data)
+    (.flip bkey)))
+
+(defn encode-kv
   [k v]
   (let [v (fress/write v)
         hash (.hashBytes (LongHashFunction/xx) v 0 (.limit v))
@@ -82,14 +90,6 @@
                    (.putLong hash)
                    (.flip))]
         [bkey bval]))))
-
-(defn encode-val
-  [data]
-  (let [data (fress/write data)
-        bkey (ByteBuffer/allocateDirect (.limit data))]
-    (.order bkey (ByteOrder/BIG_ENDIAN))
-    (.put bkey data)
-    (.flip bkey)))
 
 (defn decode
   [data]
@@ -121,7 +121,7 @@
 
 (defn put-key-hash
   [^Dbi db ^Txn txn key val]
-  (let [[k v] (encode key val)]
+  (let [[k v] (encode-kv key val)]
     (.put db txn k v (into-array PutFlags []))))
 
 (defn get-key
@@ -170,7 +170,7 @@
 
 (defn del-kv
   [^Dbi db ^Txn txn key val]
-  (let [[k _] (encode key val)]
+  (let [[k _] (encode-kv key val)]
     (.delete db txn k)))
 
 (defn close
@@ -373,16 +373,14 @@
             (and (not= attr :db/id)
                  (not= value (get (entity-by-id conn txn eid) attr))))
 
-          (update-ident [[eid attr value op]]
+          (update-ident [[eid attr value :as all]]
             (when (= :db/ident attr)
               (insert-ident conn txn value eid))
-            (if-let [ident (to-ident conn txn attr)]
-              [eid ident attr value op]
-              (throw (ex-info "ident not found" {:attr  attr
-                                                 :value value}))))
+            all)
 
-          (->datoms [[eid ident attr value op]]
-            (let [tid (resolve-tempid conn txn tempids "ldb.tx")]
+          (->datoms [[eid attr value op]]
+            (let [ident (to-ident conn txn attr)
+                  tid (resolve-tempid conn txn tempids "ldb.tx")]
               (if (neg? ident)
                 (let [old-value (get (entity-by-id conn txn eid) attr)]
                   (if (and op old-value)
