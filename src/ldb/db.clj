@@ -6,7 +6,7 @@
            (java.io File)
            (java.nio ByteBuffer ByteOrder)
            (clojure.lang IReduceInit Named)
-           (java.util UUID HashMap)
+           (java.util UUID HashMap Date)
            (java.time Instant)
            (net.openhft.hashing LongHashFunction)))
 
@@ -14,7 +14,8 @@
                        ^Dbi aevt ^Dbi aevt-history
                        ^Dbi avet ^Dbi avet-history
                        ^Dbi vaet ^Dbi vaet-history
-                       ^Env env ^Dbi status ^Dbi ident])
+                       ^Env env ^Dbi status ^Dbi ident
+                       ^Dbi log])
 
 ;; specs
 (def value-types #{:db.type/keyword
@@ -40,6 +41,7 @@
 ;; const
 
 (def schema-idents (clojure.set/union
+                     #{:tx/txInstant}
                      #{:db/ident :db/valueType :db/cardinality}
                      #{:db.cardinality/one :db.cardinality/many}
                      value-types))
@@ -50,7 +52,7 @@
   (if (int? data)
     (let [bkey (ByteBuffer/allocateDirect 8)]
       (.order bkey (ByteOrder/BIG_ENDIAN))
-      (.putInt bkey data)
+      (.putLong bkey data)
       (.flip bkey))
     (let [data (fress/write data)
           bkey (ByteBuffer/allocateDirect (.limit data))]
@@ -69,7 +71,7 @@
     (if (int? k)
       (let [bkey (doto (ByteBuffer/allocateDirect 16)
                    (.order (ByteOrder/BIG_ENDIAN))
-                   (.putInt k)
+                   (.putLong k)
                    (.putLong hash)
                    (.flip))]
         [bkey bval])
@@ -96,7 +98,7 @@
 (defn decode-key
   [buffer int-key?]
   (if int-key?
-    (let [n (.getInt buffer)]
+    (let [n (.getLong buffer)]
       (.flip buffer)
       n)
     (decode buffer)))
@@ -145,7 +147,7 @@
 (defn scan-key
   [^Dbi db ^Txn txn key]
   (let [ekey (encode-key key)
-        range (KeyRange/greaterThan ekey)]
+        range (KeyRange/atLeast ekey)]
     (eduction
       (take-while (fn [kv]
                     (let [k (decode-key (.key kv) (int? key))]
@@ -192,7 +194,7 @@
   [^String filepath]
   (let [^Env env (-> (Env/create)
                      (.setMapSize 1099511627776)
-                     (.setMaxDbs 10)
+                     (.setMaxDbs 11)
                      (.open (File. filepath) nil))]
     (letfn [(open-db [name]
               (.openDbi env name (into-array DbiFlags [DbiFlags/MDB_CREATE])))]
@@ -207,7 +209,8 @@
                     :vaet         (open-db "vaet")
                     :vaet-history (open-db "vaet-history")
                     :status       (open-db "status")
-                    :ident        (open-db "ident")})]
+                    :ident        (open-db "ident")
+                    :log          (open-db "log")})]
         (with-open [txn (txn-write conn)]
           (doseq [[i ident] (map-indexed vector schema-idents)]
             (insert-ident conn txn ident (- (inc i))))
@@ -301,10 +304,11 @@
 
         validate (fn [attr value]
                    (when-not (= :db/id attr)
-                     (let [ident (to-ident conn txn attr)]
+                     (if-let [ident (to-ident conn txn attr)]
                        (when-not (neg? ident)
                          (let [schema (entity-by-id conn txn ident)]
-                           (validate-value value schema))))))
+                           (validate-value value schema)))
+                       (throw (ex-info "ident unknown" {:attr attr})))))
         eid (get-eid m)
         xf (fn [[attr value]]
              (validate attr value)
@@ -331,23 +335,24 @@
                [[eid attr value true]]))]
     (eduction (mapcat xf) m)))
 
-(defn action->datoms
-  [^Connection conn ^Txn txn ^Integer tid tempids]
-  (letfn [(tempid->eid [tempid]
-            (if-let [id (.get tempids tempid)]
-              id
-              (let [eid (get-and-inc conn txn :last-eid)]
-                (.put tempids tempid eid)
-                eid)))
+(defn resolve-tempid
+  [^Connection conn ^Txn txn tempids tempid]
+  (if-let [id (.get tempids tempid)]
+    id
+    (let [eid (get-and-inc conn txn :last-eid)]
+      (.put tempids tempid eid)
+      eid)))
 
-          (load-schema [attr]
+(defn action->datoms
+  [^Connection conn ^Txn txn ^Integer tempids]
+  (letfn [(load-schema [attr]
             (entity-by-id conn txn (to-ident conn txn attr)))
 
           (resolve-tempids [attr value]
             (let [{:db/keys [valueType]} (load-schema attr)]
               (case valueType
                 :db.type/ref
-                (if (string? value) (tempid->eid value) value)
+                (if (string? value) (resolve-tempid conn txn tempids value) value)
                 value)))
 
           (hydrate [[eid attr value tx op :as datom]]
@@ -359,7 +364,7 @@
                   (throw (ex-info "entity not found" {:eid eid})))
 
                 (string? eid)
-                [(tempid->eid eid) attr value tx op]
+                [(resolve-tempid conn txn tempids eid) attr value tx op]
 
                 :default
                 [(get-and-inc conn txn :last-eid) attr value tx op])))
@@ -377,26 +382,27 @@
                                                  :value value}))))
 
           (->datoms [[eid ident attr value op]]
-            (if (neg? ident)
-              (let [old-value (get (entity-by-id conn txn eid) attr)]
-                (if (and op old-value)
-                  [[eid ident old-value tid false]
-                   [eid ident value tid true]]
-                  [[eid ident value tid op]]))
+            (let [tid (resolve-tempid conn txn tempids "ldb.tx")]
+              (if (neg? ident)
+                (let [old-value (get (entity-by-id conn txn eid) attr)]
+                  (if (and op old-value)
+                    [[eid ident old-value tid false]
+                     [eid ident value tid true]]
+                    [[eid ident value tid op]]))
 
-              (let [{:db/keys [cardinality]} (entity-by-id conn txn ident)]
-                (case cardinality
-                  :db.cardinality/one
-                  (let [old-value (get (entity-by-id conn txn eid) attr)]
-                    (if (and op old-value)
-                      [[eid ident old-value tid false]
-                       [eid ident value tid true]]
-                      [[eid ident value tid op]]))
+                (let [{:db/keys [cardinality]} (entity-by-id conn txn ident)]
+                  (case cardinality
+                    :db.cardinality/one
+                    (let [old-value (get (entity-by-id conn txn eid) attr)]
+                      (if (and op old-value)
+                        [[eid ident old-value tid false]
+                         [eid ident value tid true]]
+                        [[eid ident value tid op]]))
 
-                  :db.cardinality/many
-                  (let [old-value (get (entity-by-id conn txn eid) attr)]
-                    (when-not (and op (contains? old-value value))
-                      [[eid ident value tid op]]))))))]
+                    :db.cardinality/many
+                    (let [old-value (get (entity-by-id conn txn eid) attr)]
+                      (when-not (and op (contains? old-value value))
+                        [[eid ident value tid op]])))))))]
 
     (comp
       (map hydrate)
@@ -405,11 +411,11 @@
       (mapcat ->datoms))))
 
 (defn vector->actions
-  [conn txn tid [action eid attr value]]
+  [conn txn [action eid attr value]]
   (case action
     :db.fn/retractEntity
     (if-let [entity (entity-by-id conn txn eid)]
-      (eduction (filter (fn [[attr value]] [eid attr value tid false])) entity)
+      (eduction (filter (fn [[attr value]] [eid attr value false])) entity)
       (throw (ex-info "entity not found" {:eid eid})))
 
     :db/add
@@ -446,41 +452,56 @@
         [datom to-retract]))))
 
 (defn insert->datoms
-  [^Connection conn ^Txn txn ^Integer tid tx-data]
-  (letfn [(step [state input]
-            (let [xs (cond
-                       (map? input)
-                       (map->actions conn txn input)
+  [^Connection conn ^Txn txn ^Integer tx-data]
+  (let [tempids (HashMap.)
+        tx {:db/id        "ldb.tx"
+            :tx/txInstant (Date.)}
+        tx-data (conj tx-data tx)]
+    (letfn [(rf [state input]
+              (let [xs (cond
+                         (map? input)
+                         (map->actions conn txn input)
 
-                       (vector? input)
-                       (vector->actions conn txn tid input))
+                         (vector? input)
+                         (vector->actions conn txn input))
 
-                  datoms (into (:datoms state)
-                               (comp
-                                 (action->datoms conn txn tid (:tempids state))
-                                 (mapcat (partial update-indexes conn txn)))
-                               xs)]
-              {:tempids (:tempids state)
-               :datoms  datoms}))]
+                    datoms (into (:datoms state)
+                                 (comp
+                                   (action->datoms conn txn (:tempids state))
+                                   (mapcat (partial update-indexes conn txn)))
+                                 xs)]
+                {:tempids (:tempids state)
+                 :datoms  datoms}))]
 
-    (reduce step {:tempids (HashMap.)
-                  :datoms  []} tx-data)))
+      (let [res (reduce rf {:tempids tempids
+                            :datoms  []} tx-data)
+            tid (get (:tempids res) "ldb.tx")
+            tx (entity-by-id conn txn tid)]
+        (put-key (.-log conn) txn (.getTime (:tx/txInstant tx)) tx)
+        (assoc res :tx tx)))))
 
 (defn transact
   [^Connection conn data]
   (let [tx-data (:tx-data data)]
     (with-open [txn (txn-write conn)]
-      (let [tid (System/currentTimeMillis)]
-        (binding [entity-by-id (memoize entity-by-id)
-                  gen-tempid (let [counter (volatile! 0)]
-                               (fn []
-                                 (str (vswap! counter inc))))]
-          (let [result (insert->datoms conn txn tid tx-data)]
-            (txn-commit txn)
-            result))))))
+      (binding [entity-by-id (let [m (HashMap.)
+                                   fun entity-by-id]
+                               (fn [conn txn eid]
+                                 (when eid
+                                   (if-let [entity (.get m eid)]
+                                     entity
+                                     (let [entity (fun conn txn eid)]
+                                       (.put m eid entity)
+                                       entity)))))
+                gen-tempid (let [counter (volatile! 0)]
+                             (fn []
+                               (str (vswap! counter inc))))]
+        (let [result (insert->datoms conn txn tx-data)]
+          (txn-commit txn)
+          result)))))
 
 (defn show-db
-  [{:keys [eavt eavt-history aevt aevt-history vaet vaet-history status ident] :as conn}]
+  [{:keys [eavt eavt-history aevt aevt-history vaet vaet-history status ident log] :as conn}]
   (with-open [txn (txn-read conn)]
     (letfn [(load-index [db]
               (into (sorted-map) (group-by first (eduction (map second) (scan-all db txn)))))]
@@ -490,7 +511,7 @@
                 :history (load-index aevt-history)}
        :vaet   {:current (load-index vaet)
                 :history (load-index vaet-history)}
-
+       :log    (into [] (scan-all log txn true))
        :status (into [] (scan-all status txn))
        :ident  (into [] (scan-all ident txn))})))
 
