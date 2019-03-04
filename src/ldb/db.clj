@@ -257,7 +257,7 @@
     :db.type/bigint (integer? value)
     :db.type/float (float? value)
     :db.type/double (double? value)
-    :db.type/ref (int? value)
+    :db.type/ref (map? value)
     :db.type/instant (instance? Instant value)
     :db.type/uuid (instance? UUID value)
     :db.type/bytes (bytes? value)
@@ -266,15 +266,13 @@
 
 (defn valid-value?
   [{:db/keys [_ valueType cardinality]} value]
-  (println valueType cardinality value)
   (case cardinality
     :db.cardinality/one
     (valid-type? valueType value)
 
     :db.cardinality/many
-    (if (= valueType :db.type/ref)
-      (int? value)
-      (valid-type? valueType value))))
+    (and (coll? value)
+         (every? (partial valid-type? valueType) value))))
 
 (defn validate-value
   [value schema]
@@ -300,8 +298,16 @@
   (let [get-eid (fn [m] (or (:db/id m)
                             (to-ident conn txn (:db/ident m))
                             (gen-tempid)))
+
+        validate (fn [attr value]
+                   (when-not (= :db/id attr)
+                     (let [ident (to-ident conn txn attr)]
+                       (when-not (neg? ident)
+                         (let [schema (entity-by-id conn txn ident)]
+                           (validate-value value schema))))))
         eid (get-eid m)
         xf (fn [[attr value]]
+             (validate attr value)
              (cond
                (map? value)
                (let [new-eid (get-eid value)
@@ -338,7 +344,7 @@
             (entity-by-id conn txn (to-ident conn txn attr)))
 
           (resolve-tempids [attr value]
-            (let [{:db/keys [valueType cardinality]} (load-schema attr)]
+            (let [{:db/keys [valueType]} (load-schema attr)]
               (case valueType
                 :db.type/ref
                 (if (string? value) (tempid->eid value) value)
@@ -370,12 +376,6 @@
               (throw (ex-info "ident not found" {:attr  attr
                                                  :value value}))))
 
-          (validate [[_ ident _ value :as all]]
-            (when-not (neg? ident)
-              (let [schema (entity-by-id conn txn ident)]
-                (validate-value value schema)))
-            all)
-
           (->datoms [[eid ident attr value op]]
             (if (neg? ident)
               (let [old-value (get (entity-by-id conn txn eid) attr)]
@@ -402,7 +402,6 @@
       (map hydrate)
       (filter filter-attr)
       (map update-ident)
-      (map validate)
       (mapcat ->datoms))))
 
 (defn vector->actions
