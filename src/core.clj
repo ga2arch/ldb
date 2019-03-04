@@ -36,7 +36,10 @@
                                :db/cardinality :db.cardinality/one}
                               {:db/ident       :paper/data
                                :db/valueType   :db.type/bytes
-                               :db/cardinality :db.cardinality/one}]})
+                               :db/cardinality :db.cardinality/one}
+                              {:db/ident       :paper/test
+                               :db/valueType   :db.type/string
+                               :db/cardinality :db.cardinality/many}]})
 
   (def data (bytes (:body (client/get
                             "https://www.ndss-symposium.org/wp-content/uploads/2019/02/ndss2019_02B-5_Wampler_paper.pdf"
@@ -44,7 +47,8 @@
 
   (d/transact conn {:tx-data [{:paper/title "Ex Spectre"
                                :paper/link  "https://www.ndss-symposium.org/wp-content/uploads/2019/02/ndss2019_02B-5_Wampler_paper.pdf"
-                               :paper/data  (.getBytes "kek")}]})
+                               :paper/data  (.getBytes "kek")
+                               :paper/test ["kek" "lol"]}]})
 
   (d/transact conn {:tx-data [{                             ;:db/id   3
                                :name    "Kek"

@@ -266,6 +266,7 @@
 
 (defn valid-value?
   [{:db/keys [_ valueType cardinality]} value]
+  (println valueType cardinality value)
   (case cardinality
     :db.cardinality/one
     (valid-type? valueType value)
@@ -273,8 +274,7 @@
     :db.cardinality/many
     (if (= valueType :db.type/ref)
       (int? value)
-      (and (coll? value)
-           (every? (partial valid-type? valueType) value)))))
+      (valid-type? valueType value))))
 
 (defn validate-value
   [value schema]
@@ -317,6 +317,9 @@
                                       (map->actions conn txn (assoc value :db/id neid)))
                                     value new-eids)]
                  (eduction cat [datoms values]))
+
+               (coll? value)
+               (eduction (map (fn [val] [eid attr val true])) value)
 
                :else
                [[eid attr value true]]))]
