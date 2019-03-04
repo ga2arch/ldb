@@ -463,20 +463,20 @@
                          (vector? input)
                          (vector->actions conn txn input))
 
-                    datoms (into (:datoms state)
+                    datoms (into (:tx-data state)
                                  (comp
                                    (action->datoms conn txn (:tempids state))
                                    (mapcat (partial update-indexes conn txn)))
                                  xs)]
                 {:tempids (:tempids state)
-                 :datoms  datoms}))]
+                 :tx-data datoms}))]
 
       (let [res (reduce rf {:tempids tempids
-                            :datoms  []} tx-data)
+                            :tx-data []} tx-data)
             tid (get (:tempids res) "ldb.tx")
             tx (entity-by-id conn txn tid)]
-        (put-key (.-log conn) txn (.getTime (:tx/txInstant tx)) tx)
-        (assoc res :tx tx)))))
+        (put-key (.-log conn) txn (.getTime (:tx/txInstant tx)) (assoc tx :tx/txData (:tx-data res)))
+        res))))
 
 (defn transact
   [^Connection conn data]
