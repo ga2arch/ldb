@@ -41,10 +41,10 @@
 ;; const
 
 (def schema-idents (clojure.set/union
-                     #{:tx/txInstant}
-                     #{:db/ident :db/valueType :db/cardinality}
-                     #{:db.cardinality/one :db.cardinality/many}
-                     value-types))
+                    #{:tx/txInstant}
+                    #{:db/ident :db/valueType :db/cardinality}
+                    #{:db.cardinality/one :db.cardinality/many}
+                    value-types))
 ;;
 
 (defn encode-key
@@ -73,9 +73,10 @@
   (let [v (fress/write v)
         hash (.hashBytes (LongHashFunction/xx) v 0 (.limit v))
         bval (ByteBuffer/allocateDirect (.limit v))]
-    (.order bval (ByteOrder/BIG_ENDIAN))
-    (.put bval v)
-    (.flip bval)
+    (doto bval
+      (.order (ByteOrder/BIG_ENDIAN))
+      (.put v)
+      (.flip))
     (if (int? k)
       (let [bkey (doto (ByteBuffer/allocateDirect 16)
                    (.order (ByteOrder/BIG_ENDIAN))
@@ -149,10 +150,10 @@
   (let [ekey (encode-key key)
         range (KeyRange/atLeast ekey)]
     (eduction
-      (take-while (fn [kv]
-                    (let [k (decode-key (.key kv) (int? key))]
-                      (= key k))))
-      (map #(decode (.val %))) (scan db txn range))))
+     (take-while (fn [kv]
+                   (let [k (decode-key (.key kv) (int? key))]
+                     (= key k))))
+     (map #(decode (.val %))) (scan db txn range))))
 
 (defn scan-all
   ([^Dbi db ^Txn txn]
@@ -199,18 +200,18 @@
     (letfn [(open-db [name]
               (.openDbi env name (into-array DbiFlags [DbiFlags/MDB_CREATE])))]
       (let [conn (map->Connection
-                   {:env          env
-                    :eavt         (open-db "eavt")
-                    :eavt-history (open-db "eavt-history")
-                    :aevt         (open-db "aevt")
-                    :aevt-history (open-db "aevt-history")
-                    :avet         (open-db "avet")
-                    :avet-history (open-db "avet-history")
-                    :vaet         (open-db "vaet")
-                    :vaet-history (open-db "vaet-history")
-                    :status       (open-db "status")
-                    :ident        (open-db "ident")
-                    :log          (open-db "log")})]
+                  {:env          env
+                   :eavt         (open-db "eavt")
+                   :eavt-history (open-db "eavt-history")
+                   :aevt         (open-db "aevt")
+                   :aevt-history (open-db "aevt-history")
+                   :avet         (open-db "avet")
+                   :avet-history (open-db "avet-history")
+                   :vaet         (open-db "vaet")
+                   :vaet-history (open-db "vaet-history")
+                   :status       (open-db "status")
+                   :ident        (open-db "ident")
+                   :log          (open-db "log")})]
         (with-open [txn (txn-write conn)]
           (doseq [[i ident] (map-indexed vector schema-idents)]
             (insert-ident conn txn ident (- (inc i))))
@@ -226,18 +227,18 @@
   ([^Connection conn ^Txn txn eid]
    (when eid
      (let [entity (reduce
-                    (fn [acc [_ attr value _ _]]
-                      (let [attr (from-ident conn txn attr)
-                            m (acc attr)]
-                        (cond
-                          (coll? m)
-                          (assoc acc attr (conj m value))
+                   (fn [acc [_ attr value _ _]]
+                     (let [attr (from-ident conn txn attr)
+                           m (acc attr)]
+                       (cond
+                         (coll? m)
+                         (assoc acc attr (conj m value))
 
-                          (nil? m)
-                          (assoc acc attr value)
+                         (nil? m)
+                         (assoc acc attr value)
 
-                          :else
-                          (assoc acc attr #{m value})))) {} (scan-key (.-eavt conn) txn eid))]
+                         :else
+                         (assoc acc attr #{m value})))) {} (scan-key (.-eavt conn) txn eid))]
        (when-not (empty? entity)
          (assoc entity :db/id eid))))))
 
@@ -286,8 +287,8 @@
 (defn find-datom
   [^Connection conn ^Txn txn [eid attr value]]
   (let [xf (comp
-             (filter (fn [[ceid cattr cvalue]] (and (= ceid eid) (= cattr attr) (= cvalue value))))
-             (halt-when any?))]
+            (filter (fn [[ceid cattr cvalue]] (and (= ceid eid) (= cattr attr) (= cvalue value))))
+            (halt-when any?))]
     (transduce xf identity nil (scan-key (.-eavt conn) txn eid))))
 
 (defn ^:dynamic gen-tempid [] (rand-int 99999))
@@ -403,10 +404,10 @@
                         [[eid ident value tid op]])))))))]
 
     (comp
-      (map hydrate)
-      (filter filter-attr)
-      (map update-ident)
-      (mapcat ->datoms))))
+     (map hydrate)
+     (filter filter-attr)
+     (map update-ident)
+     (mapcat ->datoms))))
 
 (defn vector->actions
   [conn txn [action eid attr value]]
@@ -465,8 +466,8 @@
 
                     datoms (into (:tx-data state)
                                  (comp
-                                   (action->datoms conn txn (:tempids state))
-                                   (mapcat (partial update-indexes conn txn)))
+                                  (action->datoms conn txn (:tempids state))
+                                  (mapcat (partial update-indexes conn txn)))
                                  xs)]
                 {:tempids (:tempids state)
                  :tx-data datoms}))]
@@ -475,7 +476,8 @@
                             :tx-data []} tx-data)
             tid (get (:tempids res) "ldb.tx")
             tx (entity-by-id conn txn tid)]
-        (put-key (.-log conn) txn (.getTime (:tx/txInstant tx)) (assoc tx :tx/txData (:tx-data res)))
+        (put-key (.-log conn) txn (.getTime (:tx/txInstant tx))
+                 (assoc tx :tx/txData (:tx-data res)))
         res))))
 
 (defn transact
@@ -557,13 +559,13 @@
       :else
       (if-not (lvar? val)
         (eduction
-          (mapcat second)
-          filter-val
-          (scan-all (.-aevt conn) txn))
+         (mapcat second)
+         filter-val
+         (scan-all (.-aevt conn) txn))
 
         (eduction
-          (mapcat second)
-          (scan-all (.-aevt conn) txn))))))
+         (mapcat second)
+         (scan-all (.-aevt conn) txn))))))
 
 (defn match-datom
   [frame pattern datom]
@@ -582,8 +584,8 @@
 (defn match-pattern
   [frame pattern]
   (comp
-    (map (partial match-datom frame pattern))
-    (filter (complement nil?))))
+   (map (partial match-datom frame pattern))
+   (filter (complement nil?))))
 
 (defn update-pattern
   [conn txn frame [eid attr value]]
@@ -601,8 +603,8 @@
                        (let [pattern (update-pattern conn txn frame pattern)
                              datoms (load-datoms conn txn pattern)]
                          (eduction
-                           (filter (fn [[_ _ _ _ op]] op))
-                           (match-pattern frame pattern) datoms)))))
+                          (filter (fn [[_ _ _ _ op]] op))
+                          (match-pattern frame pattern) datoms)))))
            (substitute [frame]
              (eduction (map (partial get frame)) find))]
      (eduction (apply comp (mapv xf where))
