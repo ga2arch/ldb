@@ -287,7 +287,11 @@
 (defn find-datom
   [^Connection conn ^Txn txn [eid attr value]]
   (let [xf (comp
-            (filter (fn [[ceid cattr cvalue]] (and (= ceid eid) (= cattr attr) (= cvalue value))))
+            (filter (fn [[ceid cattr cvalue]]
+                      (let [{valueType :db/valueType} (entity-by-id conn txn cattr)]
+                        (if (= valueType :db.type/bytes)
+                          (and (= ceid eid) (= cattr attr))
+                          (and (= ceid eid) (= cattr attr) (= cvalue value))))))
             (halt-when any?))]
     (transduce xf identity nil (scan-key (.-eavt conn) txn eid))))
 
