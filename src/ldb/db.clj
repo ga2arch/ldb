@@ -10,6 +10,7 @@
            (java.time Instant)
            (net.openhft.hashing LongHashFunction)))
 
+;; Connection is a record which holds indexes and extra databases
 (defrecord Connection [^Dbi eavt ^Dbi eavt-history
                        ^Dbi aevt ^Dbi aevt-history
                        ^Dbi avet ^Dbi avet-history
@@ -30,9 +31,9 @@
                         :db.type/instant
                         :db.type/uuid
                         :db.type/bytes})
-
 (def schema-cardinality #{:db.cardinality/one
                           :db.cardinality/many})
+(def tx-keys #{:tx/txInstant})
 
 (s/def :db/ident keyword?)
 (s/def :db/id (s/or :id int?
@@ -43,14 +44,19 @@
 
 ;; const
 
-(def schema-idents (clojure.set/union
-                    #{:tx/txInstant}
-                    schema-keys
-                    schema-valueType
-                    schema-cardinality))
-;;
+(def schema-idents
+  "Private database attributes which are inserted at connection time.
+  They will be inserted with negative index so on insertion they will not be validated."
+  (clojure.set/union
+   tx-keys
+   schema-keys
+   schema-valueType
+   schema-cardinality))
 
 (defn encode-key
+  "Encode `data` into a BIG_ENDIAN bytebuffer. If `data` is a 'int'
+  encode it as a long otherwise use fressian to serialize.
+  BIG_ENDIAN byte order is used to mantain asc sort order."
   [data]
   (if (int? data)
     (let [bkey (ByteBuffer/allocateDirect 8)]
@@ -64,6 +70,7 @@
       (.flip bkey))))
 
 (defn encode-val
+  "Encode `data` into a BIG_ENDIAN bytebuffer. Use fressian to serialize."
   [data]
   (let [data (fress/write data)
         bkey (ByteBuffer/allocateDirect (.limit data))]
@@ -72,6 +79,9 @@
     (.flip bkey)))
 
 (defn encode-kv
+  "Encode a `k` `v` pair appending the hash of `v` to the `k` after the serialized `k`
+  this allows to store multiple entires with the same `k` but different `v`.
+  (cannot use MDB_DUPSORT because then the value lenght will be bounded to key max length)"
   [k v]
   (let [v (fress/write v)
         hash (.hashBytes (LongHashFunction/xx) v 0 (.limit v))
@@ -96,10 +106,13 @@
         [bkey bval]))))
 
 (defn decode
+  "Decode `data` using fressian."
   [data]
   (fress/read data))
 
 (defn decode-key
+  "Decode `buffer` converting it from long if `buffer` is an 'int' key,
+  using fressian otherwise."
   [buffer int-key?]
   (if int-key?
     (let [n (.getLong buffer)]
@@ -108,32 +121,39 @@
     (decode buffer)))
 
 (defn txn-read
+  "Open a read transaction."
   [^Connection conn]
   (.txnRead ^Env (.-env conn)))
 
 (defn txn-write
+  "Open a write transaction."
   [^Connection conn]
   (.txnWrite ^Env (.-env conn)))
 
 (defn txn-commit
+  "Commit a transaction."
   [^Txn txn]
   (.commit txn))
 
 (defn put-key
+  "Put `key` `val` pair into `db` using tx `txn` without duplicates"
   [^Dbi db ^Txn txn key val]
   (.put db txn (encode-key key) (encode-val val) (into-array PutFlags [])))
 
 (defn put-key-hash
+  "Put `key` `val` pair into `db` using tx `txn` using duplicates encoding"
   [^Dbi db ^Txn txn key val]
   (let [[k v] (encode-kv key val)]
     (.put db txn k v (into-array PutFlags []))))
 
 (defn get-key
+  "Get `key` from `db` using tx `txn`"
   [^Dbi db ^Txn txn key]
   (when-let [v (.get db txn (encode-key key))]
     (decode v)))
 
 (defn scan
+  "Scan all kv of `db` using tx `txn` and range `range`"
   [^Dbi db ^Txn txn ^KeyRange range]
   (reify IReduceInit
     (reduce [this f init]
@@ -149,6 +169,7 @@
             (.close it)))))))
 
 (defn scan-key
+  "Scan all kv of `db` using tx `txn` that have key >= `key`."
   [^Dbi db ^Txn txn key]
   (let [ekey (encode-key key)
         range (KeyRange/atLeast ekey)]
@@ -159,6 +180,7 @@
      (map #(decode (.val %))) (scan db txn range))))
 
 (defn scan-all
+  "Scan all kv of `db` using tx `txn` decoding key and value."
   ([^Dbi db ^Txn txn]
    (scan-all db txn false))
   ([^Dbi db ^Txn txn int-key?]
