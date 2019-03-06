@@ -18,33 +18,36 @@
                        ^Dbi log])
 
 ;; specs
-(def value-types #{:db.type/keyword
-                   :db.type/string
-                   :db.type/boolean
-                   :db.type/long
-                   :db.type/bigint
-                   :db.type/float
-                   :db.type/double
-                   :db.type/ref
-                   :db.type/instant
-                   :db.type/uuid
-                   :db.type/bytes})
+(def schema-keys #{:db/ident :db/valueType :db/cardinality})
+(def schema-valueType #{:db.type/keyword
+                        :db.type/string
+                        :db.type/boolean
+                        :db.type/long
+                        :db.type/bigint
+                        :db.type/float
+                        :db.type/double
+                        :db.type/ref
+                        :db.type/instant
+                        :db.type/uuid
+                        :db.type/bytes})
+
+(def schema-cardinality #{:db.cardinality/one
+                          :db.cardinality/many})
 
 (s/def :db/ident keyword?)
 (s/def :db/id (s/or :id int?
                     :tempid string?))
-(s/def :db/valueType value-types)
-(s/def :db/cardinality #{:db.cardinality/one
-                         :db.cardinality/many})
+(s/def :db/valueType schema-valueType)
+(s/def :db/cardinality schema-cardinality)
 (s/def ::schema (s/keys :req [:db/ident :db/valueType :db/cardinality]))
 
 ;; const
 
 (def schema-idents (clojure.set/union
                     #{:tx/txInstant}
-                    #{:db/ident :db/valueType :db/cardinality}
-                    #{:db.cardinality/one :db.cardinality/many}
-                    value-types))
+                    schema-keys
+                    schema-valueType
+                    schema-cardinality))
 ;;
 
 (defn encode-key

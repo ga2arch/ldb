@@ -1,6 +1,7 @@
 (ns core
   (:require [ldb.db :as d]
-            [clj-http.client :as client]))
+            [clj-http.client :as client]
+            [cognitect.anomalies :as a]))
 
 (def db ".")
 (def conn (d/connect db))
@@ -42,21 +43,20 @@
                                :db/cardinality :db.cardinality/many}]})
 
   (def data (bytes (:body (client/get
-                            "https://www.ndss-symposium.org/wp-content/uploads/2019/02/ndss2019_02B-5_Wampler_paper.pdf"
-                            {:as :byte-array}))))
+                           "https://www.ndss-symposium.org/wp-content/uploads/2019/02/ndss2019_02B-5_Wampler_paper.pdf"
+                           {:as :byte-array}))))
 
   (d/transact conn {:tx-data [{:paper/title "Ex Spectre"
                                :paper/link  "https://www.ndss-symposium.org/wp-content/uploads/2019/02/ndss2019_02B-5_Wampler_paper.pdf"
                                :paper/data  (.getBytes "kek")
                                :paper/test ["kek" "lol"]}]})
 
-  (d/transact conn {:tx-data [{                             ;:db/id   3
+  (d/transact conn {:tx-data [{;:db/id   3
                                :name    "Kek"
                                :surname "Carrettoni"
-                               :address [{                  ;:db/id 4
+                               :address [{;:db/id 4
                                           :name  "Via lol"}
-                                         {
-                                          :name  "dub"}]}]})
+                                         {:name  "dub"}]}]})
 
   (do (d/transact conn {:tx-data [{:name    ["Gabriele"]
                                    :surname "Carrettoni"}]})
