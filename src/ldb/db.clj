@@ -7,7 +7,6 @@
            (java.nio ByteBuffer ByteOrder)
            (clojure.lang IReduceInit Named)
            (java.util UUID HashMap Date)
-           (java.time Instant)
            (net.openhft.hashing LongHashFunction)))
 
 ;; Connection is a record which holds indexes and extra databases
@@ -191,19 +190,23 @@
      (eduction (map rf) (scan db txn (KeyRange/all))))))
 
 (defn del-key
+  "Delete `key` in `db` using tx `txn`."
   [^Dbi db ^Txn txn key]
   (.delete db txn (encode-key key)))
 
 (defn del-kv
+  "Delete `key` with `val` in `db` using tx `txn`."
   [^Dbi db ^Txn txn key val]
   (let [[k _] (encode-kv key val)]
     (.delete db txn k)))
 
 (defn close
+  "Close `conn`."
   [^Connection conn]
   (.close ^Env (.-env conn)))
 
 (defn insert-ident
+  "Insert ident into ident database."
   [^Connection conn ^Txn txn key value]
   (put-key (.-ident conn) txn key value)
   (put-key (.-ident conn) txn (str value) key))
@@ -217,6 +220,7 @@
   (get-key (.-ident conn) txn key))
 
 (defn connect
+  "Create database."
   [^String filepath]
   (let [^Env env (-> (Env/create)
                      (.setMapSize 1099511627776)
@@ -287,7 +291,7 @@
     :db.type/float (float? value)
     :db.type/double (double? value)
     :db.type/ref (map? value)
-    :db.type/instant (instance? Instant value)
+    :db.type/instant (instance? Date value)
     :db.type/uuid (instance? UUID value)
     :db.type/bytes (bytes? value)
 
